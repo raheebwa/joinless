@@ -11,3 +11,10 @@ bumps the MINOR version and is listed under `Changed` or `Removed`. "0.x, caveat
 warns nobody.
 
 ## [Unreleased]
+
+### Added
+
+- Package manifest (`pyproject.toml`) with a PEP 639 MIT licence expression.
+- `dev` and `neural` optional install profiles.
+- `joinless` console entry point.
+- The importable `joinless` package.
