@@ -501,16 +501,16 @@ def test_doctor_reports_the_base_profile_without_importing_the_runtime(
 
     assert exit_code == 0
     assert "installed profile: base" in capsys.readouterr().out
-    assert "onnxruntime" not in sys.modules
 
 
-def test_doctor_reports_the_neural_profile_without_importing_the_runtime(
+def test_doctor_reports_the_neural_profile_without_asking_the_runtime(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #44: 'without importing the inference runtime to find out' -
-    faking a positive find_spec result (rather than actually installing the
-    extra) is what proves the detection path itself never imports
-    onnxruntime, regardless of which way the answer comes out."""
+    """Issue #44: report the profile "without importing the inference runtime to
+    find out". Faking a positive ``find_spec`` result, rather than installing the
+    extra, is what shows the detection path answers from metadata alone — the
+    fake spec carries ``loader=None``, so anything that tried to import from it
+    would fail rather than quietly succeed."""
     import importlib.machinery
     import importlib.util
 
@@ -527,7 +527,39 @@ def test_doctor_reports_the_neural_profile_without_importing_the_runtime(
 
     assert exit_code == 0
     assert "installed profile: neural" in capsys.readouterr().out
-    assert "onnxruntime" not in sys.modules
+
+
+_DOCTOR_IMPORT_PROBE = """
+import sys
+from joinless.cli import main
+
+main(["doctor"])
+offenders = sorted(m for m in sys.modules if m == "onnxruntime" or m.startswith("onnxruntime."))
+print("\\n".join(offenders))
+sys.exit(1 if offenders else 0)
+"""
+
+
+def test_running_doctor_never_initialises_the_runtime() -> None:
+    """The profile it reports is read from metadata, so running it must not load
+    the runtime even where the neural extra is installed.
+
+    A child interpreter, and that is load-bearing. ``sys.modules`` is global to a
+    process, so an in-process assertion that ``onnxruntime`` is absent says only
+    that nothing in the whole session imported it — it passes or fails on test
+    ordering and on which install profile CI happened to build, neither of which
+    is a property of this command."""
+    result = subprocess.run(
+        [sys.executable, "-c", _DOCTOR_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        "running doctor pulled in the inference runtime: "
+        f"{result.stdout.strip() or result.stderr.strip()}"
+    )
 
 
 def test_doctor_completes_with_no_network_interface_available() -> None:
