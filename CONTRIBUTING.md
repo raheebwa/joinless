@@ -40,8 +40,8 @@ and expected for producing a benchmark record — see
 environment resolved to. Change a bound in the manifest, then regenerate the lock — never
 edit the lock by hand.
 
-That is the base profile — the resolver, the `Matcher` protocol, the `overlap` and `fuzzy`
-arms, the benchmark harness and the CLI — plus the tooling used to develop them. The
+That is the base profile — the resolver, the `Scorer` protocol and its `ThresholdMatcher`
+adapter, the `overlap` and `fuzzy` arms, the benchmark harness and the CLI — plus the tooling used to develop them. The
 inference runtime is deliberately not in it. Working on an embedding arm needs the
 `neural` extra as well:
 

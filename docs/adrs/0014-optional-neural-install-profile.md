@@ -40,7 +40,7 @@ that is what determines what a user actually ends up with.
 
 | Profile | Install | Contains |
 |---|---|---|
-| base | `pip install joinless` | resolver, `Matcher` protocol, `overlap` and `fuzzy` arms, benchmark harness, CLI |
+| base | `pip install joinless` | resolver, `Scorer` protocol and `ThresholdMatcher`, `overlap` and `fuzzy` arms, benchmark harness, CLI |
 | neural | `pip install joinless[neural]` | the above, plus ONNX Runtime and its transitive dependencies, and the artefact preparation path |
 
 The mechanism is a packaging **extra** — a `[project.optional-dependencies]` entry, which
