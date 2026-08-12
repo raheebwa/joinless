@@ -20,7 +20,16 @@ dependencies = ["rapidfuzz>=3.10"]
 joinless = "joinless.cli:main"
 
 [project.optional-dependencies]
-dev = ["ruff>=0.16", "mypy>=2.3", "pytest>=9.1"]
+dev = [
+    "ruff>=0.16",
+    "mypy>=2.3",
+    "pytest>=9.1",
+    "pytest-cov>=7.0",
+    # The resolver's correctness properties are invariants over all inputs, not
+    # behaviours on chosen ones (CONTRIBUTING, "Test policy"). Hypothesis is what
+    # makes that statement true rather than aspirational.
+    "hypothesis>=6.140",
+]
 neural = ["onnxruntime>=1.28", "onnx>=1.22"]
 # Build-time tooling for producing model artefacts (spikes/quantization/), kept out of
 # `neural` because that extra names the inference runtime whose cost the benchmark
@@ -56,3 +65,32 @@ module = [
     "transformers.*",
 ]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "--cov --cov-branch --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["joinless"]
+branch = true
+# spikes/ is excluded deliberately, and this is the only exclusion of its kind. It
+# holds one completed experiment whose output is already recorded in benchmarks/, it
+# ships in no wheel (the build backend packages joinless/ alone), and it will not run
+# again. Every other line of shipped code is in scope.
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = true
+# This list REPLACES coverage's default, which is "# pragma: no cover". Dropping that
+# default is the point: a pragma is the one-line way to make any number reach 100, and
+# a floor that can be waived inline is not a floor. Excluding a line requires editing
+# this list, in a diff, with a reason - the three below are lines that cannot execute
+# under test rather than lines nobody got round to covering.
+exclude_lines = [
+    # Runs only when the module is executed as a script, which the suite never does.
+    'if __name__ == "__main__":',
+    # Evaluated by the type checker, never at run time.
+    "if TYPE_CHECKING:",
+    # A bare ellipsis is a Protocol member's body (RFC-0001) - a declaration, not code.
+    "^\\s*\\.\\.\\.$",
+]
