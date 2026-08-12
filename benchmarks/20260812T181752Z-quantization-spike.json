@@ -1,0 +1,397 @@
+{
+  "environment": {
+    "env": {
+      "JOINLESS_MODEL_CACHE_DIR": "/Volumes/ramar-models/joinless-spike"
+    },
+    "hardware": {
+      "cpu_count": 12,
+      "machine": "arm64",
+      "python_version": "3.14.5",
+      "release": "25.5.0",
+      "system": "Darwin",
+      "total_memory_bytes": 34359738368
+    },
+    "power_mode": "ac",
+    "runtime_versions": {
+      "onnxruntime": "1.28.0"
+    },
+    "thread_count": 1
+  },
+  "export": {
+    "command": [
+      "optimum-cli",
+      "export",
+      "onnx",
+      "--model",
+      "/Volumes/ramar-models/joinless-spike/hf/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+      "--task",
+      "feature-extraction",
+      "--cache_dir",
+      "/Volumes/ramar-models/joinless-spike/hf",
+      "/Volumes/ramar-models/joinless-spike/fp32"
+    ],
+    "output_dir": "/Volumes/ramar-models/joinless-spike/fp32",
+    "tool_versions": {
+      "onnx": "1.22.0",
+      "optimum": "2.1.0",
+      "torch": "2.13.0",
+      "transformers": "4.57.6"
+    }
+  },
+  "go_no_go": null,
+  "measurements": {
+    "fp32": {
+      "arm": "fp32",
+      "artifact_bytes": 90362391,
+      "cold_start": {
+        "cold_start_total": 2.6041349589359015,
+        "first_inference": 0.009068124927580357,
+        "import": 1.6357087909709662,
+        "interpreter_start": 0.036148583982139826,
+        "session_creation": 0.07148554199375212,
+        "tokenizer_load": 0.851723917061463
+      },
+      "peak_rss_bytes": 534380544,
+      "peak_rss_method": "resource.getrusage(RUSAGE_SELF).ru_maxrss, taken once at process exit and normalized to bytes per platform (Linux reports kibibytes, Darwin bytes)",
+      "warm_batched": {
+        "1": {
+          "count": 20.0,
+          "max": 0.00277124997228384,
+          "min": 0.002323957975022495,
+          "p50": 0.0025276875239796937
+        },
+        "32": {
+          "count": 20.0,
+          "max": 0.05390408297535032,
+          "min": 0.051812666933983564,
+          "p50": 0.05277043755631894
+        },
+        "8": {
+          "count": 20.0,
+          "max": 0.01455695799086243,
+          "min": 0.013491124962456524,
+          "p50": 0.014072770543862134
+        }
+      },
+      "warm_single_pair": {
+        "count": 20.0,
+        "max": 0.007683374918997288,
+        "min": 0.004640083061531186,
+        "p50": 0.0050536455237306654
+      }
+    },
+    "int8": {
+      "arm": "int8",
+      "artifact_bytes": 58595891,
+      "cold_start": {
+        "cold_start_total": 2.913549624965526,
+        "first_inference": 0.004157874966040254,
+        "import": 1.7312253749696538,
+        "interpreter_start": 0.026088125072419643,
+        "session_creation": 0.04510529199615121,
+        "tokenizer_load": 1.1069729579612613
+      },
+      "peak_rss_bytes": 499499008,
+      "peak_rss_method": "resource.getrusage(RUSAGE_SELF).ru_maxrss, taken once at process exit and normalized to bytes per platform (Linux reports kibibytes, Darwin bytes)",
+      "warm_batched": {
+        "1": {
+          "count": 20.0,
+          "max": 0.0012028329074382782,
+          "min": 0.0009462500456720591,
+          "p50": 0.0009912500390782952
+        },
+        "32": {
+          "count": 20.0,
+          "max": 0.025555375032126904,
+          "min": 0.023242541938088834,
+          "p50": 0.024257104436401278
+        },
+        "8": {
+          "count": 20.0,
+          "max": 0.0068764169700443745,
+          "min": 0.006039208034053445,
+          "p50": 0.006209832965396345
+        }
+      },
+      "warm_single_pair": {
+        "count": 20.0,
+        "max": 0.003383792005479336,
+        "min": 0.0020612090593203902,
+        "p50": 0.0022576459450647235
+      }
+    }
+  },
+  "model": {
+    "checksum_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+    "license": "apache-2.0",
+    "license_source": "cardData.license",
+    "local_dir": "/Volumes/ramar-models/joinless-spike/hf/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+    "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "weights_file": "model.safetensors"
+  },
+  "operators": {
+    "added": [
+      "DynamicQuantizeLinear",
+      "MatMulInteger"
+    ],
+    "changed_counts": [
+      "Cast",
+      "MatMul",
+      "Mul"
+    ],
+    "fp32_operator_counts": {
+      "Add": 62,
+      "Cast": 15,
+      "Concat": 25,
+      "Constant": 156,
+      "ConstantOfShape": 1,
+      "Div": 12,
+      "Equal": 1,
+      "Erf": 6,
+      "Expand": 1,
+      "Gather": 18,
+      "LayerNormalization": 13,
+      "MatMul": 48,
+      "Mul": 25,
+      "Reshape": 25,
+      "Shape": 22,
+      "Slice": 7,
+      "Softmax": 6,
+      "Sqrt": 18,
+      "Sub": 1,
+      "Transpose": 24,
+      "Unsqueeze": 36,
+      "Where": 2
+    },
+    "int8_operator_counts": {
+      "Add": 62,
+      "Cast": 51,
+      "Concat": 25,
+      "Constant": 156,
+      "ConstantOfShape": 1,
+      "Div": 12,
+      "DynamicQuantizeLinear": 24,
+      "Equal": 1,
+      "Erf": 6,
+      "Expand": 1,
+      "Gather": 18,
+      "LayerNormalization": 13,
+      "MatMul": 12,
+      "MatMulInteger": 36,
+      "Mul": 97,
+      "Reshape": 25,
+      "Shape": 22,
+      "Slice": 7,
+      "Softmax": 6,
+      "Sqrt": 18,
+      "Sub": 1,
+      "Transpose": 24,
+      "Unsqueeze": 36,
+      "Where": 2
+    },
+    "matmul_conversion": {
+      "Gemm": {
+        "converted_count": 0,
+        "fp32_count": 0,
+        "int8_count_remaining": 0
+      },
+      "MatMul": {
+        "converted_count": 36,
+        "fp32_count": 48,
+        "int8_count_remaining": 12
+      },
+      "replacement_ops_present": {
+        "DynamicQuantizeLinear": 24,
+        "MatMulInteger": 36
+      }
+    },
+    "removed": []
+  },
+  "quantize": {
+    "call": {
+      "extra_options": {},
+      "model_input": "/Volumes/ramar-models/joinless-spike/fp32/model.onnx",
+      "model_output": "/Volumes/ramar-models/joinless-spike/int8/model.onnx",
+      "op_types_to_quantize": [
+        "MatMul",
+        "Gemm"
+      ],
+      "per_channel": false,
+      "reduce_range": false,
+      "weight_type": "QInt8"
+    },
+    "op_types_requested": [
+      "MatMul",
+      "Gemm"
+    ]
+  },
+  "schema": "quantization-spike-v1",
+  "signatures": {
+    "differences": [],
+    "equivalent": true,
+    "fp32_inputs": [
+      {
+        "dtype": "tensor(int64)",
+        "name": "input_ids",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      },
+      {
+        "dtype": "tensor(int64)",
+        "name": "attention_mask",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      },
+      {
+        "dtype": "tensor(int64)",
+        "name": "token_type_ids",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      }
+    ],
+    "fp32_outputs": [
+      {
+        "dtype": "tensor(float)",
+        "name": "last_hidden_state",
+        "shape": [
+          "batch_size",
+          "sequence_length",
+          384
+        ]
+      }
+    ],
+    "int8_inputs": [
+      {
+        "dtype": "tensor(int64)",
+        "name": "input_ids",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      },
+      {
+        "dtype": "tensor(int64)",
+        "name": "attention_mask",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      },
+      {
+        "dtype": "tensor(int64)",
+        "name": "token_type_ids",
+        "shape": [
+          "batch_size",
+          "sequence_length"
+        ]
+      }
+    ],
+    "int8_outputs": [
+      {
+        "dtype": "tensor(float)",
+        "name": "last_hidden_state",
+        "shape": [
+          "batch_size",
+          "sequence_length",
+          384
+        ]
+      }
+    ]
+  },
+  "smoke": {
+    "max_divergence": 0.0420612096786499,
+    "per_name": [
+      {
+        "cosine_similarity": 0.9743492603302002,
+        "name": "Acme Trading Co"
+      },
+      {
+        "cosine_similarity": 0.9796982407569885,
+        "name": "Acme Trading Company"
+      },
+      {
+        "cosine_similarity": 0.969460666179657,
+        "name": "Blue Ridge Farmers Coop"
+      },
+      {
+        "cosine_similarity": 0.9778012037277222,
+        "name": "Blue Ridge Farmers Cooperative"
+      },
+      {
+        "cosine_similarity": 0.9745360016822815,
+        "name": "Falcon Freight Services"
+      },
+      {
+        "cosine_similarity": 0.9731813669204712,
+        "name": "Falcon Frieght Services"
+      },
+      {
+        "cosine_similarity": 0.9579387903213501,
+        "name": "Kampala Metal Works Limited"
+      },
+      {
+        "cosine_similarity": 0.9608038067817688,
+        "name": "Kampala Metal Works Ltd"
+      },
+      {
+        "cosine_similarity": 0.9709393382072449,
+        "name": "Nile Valley Traders"
+      },
+      {
+        "cosine_similarity": 0.9705702066421509,
+        "name": "Nile Vally Traders"
+      },
+      {
+        "cosine_similarity": 0.9658234119415283,
+        "name": "North Gate Logistics"
+      },
+      {
+        "cosine_similarity": 0.9630572199821472,
+        "name": "Northgate Logistics"
+      },
+      {
+        "cosine_similarity": 0.9743119478225708,
+        "name": "River Side Bakery"
+      },
+      {
+        "cosine_similarity": 0.9731181859970093,
+        "name": "Riverside Bakery"
+      },
+      {
+        "cosine_similarity": 0.9722537994384766,
+        "name": "Silver Line Textiles"
+      },
+      {
+        "cosine_similarity": 0.9696229100227356,
+        "name": "Silverline Textiles"
+      },
+      {
+        "cosine_similarity": 0.9752664566040039,
+        "name": "Sunrise Agro Traders"
+      },
+      {
+        "cosine_similarity": 0.9761233925819397,
+        "name": "Sunrise Agro Trading"
+      },
+      {
+        "cosine_similarity": 0.9657881855964661,
+        "name": "Zenith Hardware Supplies"
+      },
+      {
+        "cosine_similarity": 0.9600127339363098,
+        "name": "Zenith Hardware Supply"
+      }
+    ],
+    "provenance": "authored for this spike; not drawn from a corpus split (none exists yet)",
+    "smoke_set_size": 10
+  },
+  "spike": "int8-quantization-feasibility",
+  "started_at": "2026-08-12T18:17:52.062763+00:00"
+}
