@@ -404,3 +404,20 @@ def test_importing_scoring_and_scoring_with_overlap_needs_only_the_standard_libr
         "scoring with the overlap arm pulled in rapidfuzz at module level: "
         f"{result.stdout.strip() or result.stderr.strip()}"
     )
+
+
+def test_the_module_imports_under_an_optimised_interpreter() -> None:
+    """``python -OO`` discards docstrings, so anything that rewrites ``__doc__`` at
+    import time meets ``None`` there. A child interpreter is the only way to observe
+    it: ``-OO`` is decided when the process starts and cannot be turned on later."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-OO", "-c", "import joinless.scoring"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.strip()

@@ -201,9 +201,20 @@ def test_every_family_is_reportable_in_every_role(seed: int) -> None:
 
 
 @given(seed=_SEEDS)
-def test_calibration_holds_a_double_digit_count_for_every_family(seed: int) -> None:
-    """ADR-0011 rule 2 selects a threshold from calibration alone; a handful of
-    pairs per family makes that selection degenerate."""
+def test_calibration_holds_enough_pairs_per_family_for_meaningful_threshold_selection(
+    seed: int,
+) -> None:
+    """ADR-0011 rule 2 selects a threshold from calibration alone; a calibration
+    split with only one or two pairs per family makes that selection degenerate
+    (module docstring). ``_split_into_roles`` splits each family by a fixed
+    ratio of that family's own fixed size, so the per-family calibration count
+    does not vary with the seed: every positive family (size 30) contributes
+    exactly 7, and every negative family (size 90) contributes exactly 22 -
+    measured directly across the canonical seeds plus several others, not
+    assumed. 7 is a single-digit count, not the "double digit... for every
+    family" an earlier version of this test claimed; the guarantee that
+    actually holds is "comfortably past the one-or-two-pair degenerate case,"
+    which >= 7 states precisely instead of overstating."""
     corpus = generate_corpus(seed)
 
     counts: dict[str, int] = {family: 0 for family in FAMILIES}
@@ -212,7 +223,7 @@ def test_calibration_holds_a_double_digit_count_for_every_family(seed: int) -> N
             counts[_family_of(pair)] += 1
 
     for family, count in counts.items():
-        assert count >= 5, (family, count)
+        assert count >= 7, (family, count)
 
 
 # --- Class balance -------------------------------------------------------------------
