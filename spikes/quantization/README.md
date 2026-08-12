@@ -37,7 +37,7 @@ pip install -e ".[dev,export,neural]"
 - `export` — torch, transformers, `optimum[onnxruntime]`, onnx, huggingface_hub. Needed
   for steps 1–3 (fetching, exporting, quantizing). Kept out of `neural` deliberately:
   `neural` names the inference runtime whose cost the benchmark measures, and folding
-  build-time tooling into it would change what that measurement means (ADR-0015).
+  build-time tooling into it would change what that measurement means (ADR-0014).
 - `neural` — ONNX Runtime alone. Needed for steps 4–7 (loading, comparing, measuring).
 
 A writable directory for fetched artefacts and intermediate step output, supplied by

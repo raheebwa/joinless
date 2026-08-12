@@ -432,6 +432,7 @@ export = [
     { name = "transformers" },
 ]
 neural = [
+    { name = "onnx" },
     { name = "onnxruntime" },
 ]
 
@@ -439,7 +440,8 @@ neural = [
 requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'export'", specifier = ">=0.25" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3" },
-    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.16" },
+    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.22" },
+    { name = "onnx", marker = "extra == 'neural'", specifier = ">=1.22" },
     { name = "onnxruntime", marker = "extra == 'neural'", specifier = ">=1.28" },
     { name = "optimum", extras = ["onnxruntime"], marker = "extra == 'export'", specifier = ">=1.22" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1" },
