@@ -135,6 +135,50 @@ evidence for it.**
 3. Refactor with the test green.
 4. Commit. One behaviour per commit.
 
+### What makes a test count
+
+Set out in full in [ADR-0016](docs/adrs/0016-tests-assert-behaviour-and-cover-every-path.md);
+the working rules are these.
+
+**Assert behaviour a caller can observe, not the shape of the implementation.** The check:
+would the test survive a rewrite that kept the behaviour? If changing *how* the code works
+forces the test to change, the test describes the code rather than constraining it, and it
+can never report a regression.
+
+**A stand-in must be at least as awkward as the thing it replaces.** Model the real thing's
+inconvenient behaviour, not its convenient behaviour — an array-like that raises on
+`bool()` because numpy does, a subprocess double that rejects the flags the real command
+rejects, an API double that omits the fields the real host omits. A double built to make
+the test pass tests the double.
+
+**Where a double would have to be that elaborate, use the real thing.** A child
+interpreter, a temporary directory, a real file. `tests/test_import_boundary.py` spawns a
+real interpreter, because what a fresh `import joinless` pulls in is not observable from a
+process that has already imported it — the second import is served from `sys.modules` and
+never re-executes the module.
+
+**Name the behaviour, not the function.** `test_a_record_without_coordinates_is_never_dropped`,
+not `test_resolve_2`. A failing run should be readable without opening the file.
+
+### Coverage
+
+**100% line and branch coverage, enforced.** `python -m pytest` fails below it, in CI and
+in the pre-commit hook. Add a module without executing its paths and the build is red.
+
+Coverage is a **completeness** check, not a quality one: it proves no code path ships
+unexecuted and proves nothing about whether the assertion around it is worth anything —
+100% is reachable by calling everything and asserting nothing. It is paired with the rules
+above for exactly that reason, and neither half substitutes for the other.
+
+A `# pragma: no cover` comment does **not** work here. Coverage's default exclude list is
+replaced rather than extended, because a pragma is the one-line way to make any number
+reach 100 and a floor that can be waived inline is not a floor. Excluding a line takes an
+edit to `exclude_lines` in `pyproject.toml` — visible in a diff, with a reason. The three
+entries there are lines that cannot execute under test at all.
+
+While iterating on one file, `python -m pytest tests/test_x.py --no-cov` skips the floor.
+CI never does.
+
 Implementation and its tests are never written in the same pass. Tests written against
 code that already exists are **characterization tests**, and are named as such, so that a
 later reader can tell which tests specified behaviour and which merely recorded it.
