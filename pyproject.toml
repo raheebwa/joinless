@@ -12,3 +12,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Aheebwa Ramadhan" }]
 dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy", "pytest"]
+neural = ["onnxruntime"]

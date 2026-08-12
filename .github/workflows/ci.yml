@@ -271,6 +271,30 @@ jobs:
           INSTALL_PROFILE: ${{ matrix.install-profile }}
         run: python -m pip install -e ".[$INSTALL_PROFILE]"
 
+      - name: Confirm the profile's install state
+        # ADR-0014's boundary is two states, one per profile: the base profile
+        # leaves ONNX Runtime unimportable, the neural extra makes it importable.
+        # Each state is a property of the environment this matrix cell installed,
+        # not of the package's own behaviour — that in-process invariant (no
+        # module reachable from `import joinless` initialises the runtime) is
+        # covered once, profile-independently, by the test suite itself.
+        env:
+          INSTALL_PROFILE: ${{ matrix.install-profile }}
+        run: |
+          set -euo pipefail
+          case "$INSTALL_PROFILE" in
+            *neural*)
+              python -c "import onnxruntime" \
+                || { echo "::error::neural extra installed but onnxruntime is not importable"; exit 1; }
+              ;;
+            *)
+              if python -c "import onnxruntime" 2>/dev/null; then
+                echo "::error::base profile must not make onnxruntime importable"
+                exit 1
+              fi
+              ;;
+          esac
+
       - name: Run the test suite
         # The same command CONTRIBUTING.md gives a contributor to run locally.
         run: python -m pytest
