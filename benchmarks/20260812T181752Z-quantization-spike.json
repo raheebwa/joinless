@@ -38,7 +38,56 @@
       "transformers": "4.57.6"
     }
   },
-  "go_no_go": null,
+  "go_no_go": {
+    "abort_clauses": [
+      {
+        "clause": "either graph does not load or run reliably on the target",
+        "evidence": "Both graphs were loaded in a fresh process per arm and each completed an inference: measurements.fp32.cold_start.first_inference and measurements.int8.cold_start.first_inference are both populated, and each arm then completed 20 warm repeats at four batch shapes. signatures.equivalent is true with signatures.differences empty: both graphs expose input_ids, attention_mask and token_type_ids as int64 and last_hidden_state as float over [batch_size, sequence_length, 384].",
+        "holds": false
+      },
+      {
+        "clause": "no operator of consequence was quantized",
+        "evidence": "36 of the 48 MatMul nodes became MatMulInteger, supported by 24 DynamicQuantizeLinear nodes. The 36 are exactly the matmuls carrying a stored weight; the 12 that remain in fp32 are exactly those whose operands are both activations. Verified by loading each graph and partitioning its MatMul nodes on whether an input names a graph initializer: in the fp32 graph 36 do and 12 do not, and in the int8 graph none of the 12 survivors does.",
+        "gemm": "Gemm was requested alongside MatMul and the exported graph contains none, so its 0 of 0 is an operator absent from the graph, not one that was missed.",
+        "holds": false,
+        "qualification": "partial, with the boundary named below",
+        "reported_as_partial": "RFC-0004 open question 1 asks which operator types must convert for the arm to be labelled int8 honestly, and answers: the matmuls dominating encoder cost, with anything less reported as partial. This is partial. quantize_dynamic quantizes stored weights, so an activation-by-activation product has no weight to quantize and is outside what the technique can reach. The arm is therefore an encoder whose weight matmuls are int8 and whose attention products stay fp32, and it should be described that way rather than as an int8 model."
+      },
+      {
+        "clause": "no measured resource - cold start, warm latency, peak RSS, artefact size - changes materially in either direction",
+        "evidence": "Artefact size falls from 90362391 to 58595891 bytes, a reduction of 35.2 percent. Warm single-pair scoring falls from a p50 of 5.054 ms to 2.258 ms over 20 repeats. Batched preparation p50 falls from 2.528 to 0.991 ms at batch 1, from 14.073 to 6.210 ms at batch 8, and from 52.770 to 24.257 ms at batch 32.",
+        "holds": false
+      },
+      {
+        "clause": "fp32 and int8 embeddings diverge so far that the two arms are not comparable implementations of the same model",
+        "evidence": "Over the 10-name smoke set, cosine similarity between the fp32 and int8 embedding of the same name ranges from 0.9579 to 0.9803, and the maximum divergence is 0.0421.",
+        "holds": false
+      }
+    ],
+    "basis": "Written against the numbers in this record, which were produced before it. RFC-0004 aborts the spike if any one of four clauses holds; none does.",
+    "consequence": "RFC-0004 directs that on failure the int8 arm is not wired through the package and the recorded outcome becomes the reported result. No clause holds, so the arm proceeds. ADR-0009 is unchanged by this: hoisting preparation out of the comparison loop remains the primary optimization and quantization remains subordinate to it. Nothing here measures accuracy, so nothing here says whether the int8 arm matches as well as the fp32 arm.",
+    "decided_on": "2026-08-12",
+    "decision": "go",
+    "results_against_the_decision": [
+      {
+        "detail": "cold_start_total is 2.914 s for int8 against 2.604 s for fp32, 0.309 s worse. The gap sits in two components that do not depend on the arm: import, 1.636 s to 1.731 s, and tokenizer_load, 0.852 s to 1.107 s. The two components that do depend on the arm both improve: session_creation falls from 0.0715 s to 0.0451 s and first_inference from 0.00907 s to 0.00416 s. Cold start was sampled once per arm, so this record carries no dispersion for it and supports no claim about the total in either direction. It is recorded as measured; a run that repeats cold start would be needed to say more.",
+        "observation": "int8 cold start is slower in total"
+      },
+      {
+        "detail": "Peak RSS falls from 534380544 to 499499008 bytes, 6.5 percent, while the artefact falls 35.2 percent. On this runtime and this model, on-disk size does not predict resident memory, and a reader sizing a device should use the RSS figure rather than the file size.",
+        "observation": "resident memory barely moves"
+      },
+      {
+        "detail": "12 of 48 MatMul nodes remain fp32, as set out under the second clause. The speedup measured here is the speedup of a partly quantized encoder.",
+        "observation": "a quarter of the matmuls are untouched"
+      },
+      {
+        "detail": "smoke.smoke_set_size is 10 and the set was authored for this spike rather than drawn from a corpus split, which does not yet exist. The divergence range characterises these names on this machine and nothing wider. What it does not establish is whether that divergence changes a matching decision; that is a question for the evaluation harness, against labelled pairs.",
+        "observation": "the divergence figure is scoped to 10 authored names"
+      }
+    ],
+    "rfc": "RFC-0004"
+  },
   "measurements": {
     "fp32": {
       "arm": "fp32",
