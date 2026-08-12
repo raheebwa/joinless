@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Keeps commits off the default branch and on a conventionally named branch.
+# Refuses a commit that would break a rule this project states.
 # Installed by: git config core.hooksPath .githooks
 set -uo pipefail
 
+root="$(git rev-parse --show-toplevel)"
 branch="$(git symbolic-ref --short -q HEAD || true)"
+rc=0
 
 if [ "$branch" = "main" ]; then
   printf 'pre-commit: main takes changes through a pull request.\n  Start a branch: git switch -c <type>/<short-description>\n' >&2
@@ -16,8 +18,45 @@ if [ -n "$branch" ] && ! printf '%s' "$branch" | grep -qE "^($types)/[a-z0-9._-]
   exit 1
 fi
 
-# Optional local extension, kept inside the git directory so it is never
-# published. Absent by default; when present it runs as an additional gate.
+# Judge the staged content, not the working tree: a partially staged file is
+# committed as staged, and that is the version the rules have to hold for.
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+staged=()
+while IFS= read -r -d '' f; do
+  staged+=("$f")
+  mkdir -p "$tmp/$(dirname "$f")"
+  git show ":$f" > "$tmp/$f" 2>/dev/null || true
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+
+[ ${#staged[@]} -eq 0 ] && exit 0
+
+if ! ( cd "$tmp" && bash "$root/.githooks/checks.sh" all "${staged[@]}" ); then
+  printf 'pre-commit: staged content fails a project rule (above).\n' >&2
+  rc=1
+fi
+
+# The hooks carry their own tests; a hook nobody tested enforces nothing.
+for t in "$root"/tests/hooks/*.test.sh; do
+  [ -f "$t" ] || continue
+  bash "$t" >/dev/null 2>&1 || { printf 'pre-commit: %s fails.\n' "${t#$root/}" >&2; rc=1; }
+done
+
+# Once the package is installable, its own gates apply to every commit.
+if [ -f "$root/pyproject.toml" ]; then
+  missing=""
+  for t in ruff mypy pytest; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  if [ -n "$missing" ]; then
+    printf 'pre-commit: not on PATH:%s\n  Run: pip install -e ".[dev]"\n' "$missing" >&2
+    rc=1
+  else
+    ruff check "$root"        || rc=1
+    ruff format --check "$root" || rc=1
+    mypy "$root"              || rc=1
+    pytest -q "$root"         || rc=1
+  fi
+fi
+
 ext="$(git rev-parse --git-common-dir)/hooks/pre-commit.local"
-[ -x "$ext" ] && exec "$ext"
-exit 0
+[ -x "$ext" ] && { "$ext" || rc=1; }
+
+exit $rc
