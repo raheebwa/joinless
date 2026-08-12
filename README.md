@@ -54,7 +54,7 @@ Four interchangeable matchers behind one interface, measured on identical data:
 | `embed-int8` | Same model, dynamically quantized | ONNX Runtime |
 
 Two classical arms, not one, and deliberately so. Token overlap is character-blind —
-`MICROSFT` and `MICROSOFT` share no token — so measuring a transformer against it alone
+`BRIGHTWATR` and `BRIGHTWATER` share no token — so measuring a transformer against it alone
 would be measuring against a matcher nobody defends for name work. `fuzzy` is the arm that
 makes "classical" mean something.
 

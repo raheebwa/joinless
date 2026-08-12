@@ -129,11 +129,10 @@ class ThresholdMatcher(Generic[Prepared]):
 class OverlapScorer:
     """Token-overlap coefficient. Standard library only (ADR-0003).
 
-    ``prepare`` returns the frozenset of normalised tokens (see the module
-    docstring for the exact normalisation rule: casefold; punctuation and
-    underscores to a space; whitespace collapsed). ``score`` is the overlap
-    coefficient ``|A ∩ B| / min(|A|, |B|)`` — the fraction of the smaller
-    name's tokens that also appear in the larger one.
+    ``prepare`` returns the frozenset of normalised tokens — casefold,
+    punctuation and underscores to a space, whitespace collapsed. ``score`` is
+    the overlap coefficient ``|A ∩ B| / min(|A|, |B|)``: the fraction of the
+    smaller name's tokens that also appear in the larger one.
 
     This arm is character-blind: it compares whole tokens, so a single typo,
     transposition, or word concatenation that changes a token entirely
@@ -165,10 +164,12 @@ class OverlapScorer:
 class FuzzyScorer:
     """Character-aware similarity via ``rapidfuzz`` (ADR-0008).
 
-    ``prepare`` returns the normalised name (see the module docstring for the
-    exact rule) as a single string. ``score`` is the larger of two
-    ``rapidfuzz`` metrics computed on that string, matching ADR-0008's
-    decision table entry, "Jaro-Winkler / token-set ratio":
+    ``prepare`` returns the normalised name as a single string — casefold,
+    punctuation and underscores to a space, whitespace collapsed, the same rule
+    the overlap arm applies, so a difference between the two arms can only be a
+    scoring difference. ``score`` is the larger of two ``rapidfuzz`` metrics
+    computed on that string, matching ADR-0008's decision table entry,
+    "Jaro-Winkler / token-set ratio":
 
     - ``rapidfuzz.distance.JaroWinkler.normalized_similarity`` — the
       canonical character-aware metric for census and administrative name

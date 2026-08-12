@@ -9,7 +9,7 @@ comparison needs a maintained control. It assumed one classical matcher: the tok
 coefficient inherited from the prior-art resolver.
 
 That assumption is weak in a specific, well-known way. **Token overlap is character-blind.**
-`MICROSFT` and `MICROSOFT` share no token, so the coefficient is zero and the pair is
+`BRIGHTWATR` and `BRIGHTWATER` share no token, so the coefficient is zero and the pair is
 rejected. Every single-character typo, transposition, and concatenation is invisible to it.
 
 Meanwhile, the classical methods practitioners actually use for name matching are
