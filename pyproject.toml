@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "joinless"
+version = "0.1.0"
+description = "Keyless entity resolution: a reproducible classical-vs-neural benchmark"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Aheebwa Ramadhan" }]
+dependencies = []
