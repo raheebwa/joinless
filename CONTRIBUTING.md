@@ -40,6 +40,34 @@ module level.
 
 Model weights are fetched at setup and are never committed.
 
+## Hooks
+
+The commit rules below are enforced locally, not merely documented. Enable them once per
+clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Three hooks then run:
+
+- `commit-msg` rejects a subject that is not `<type>(<scope>): <subject>`, a subject over
+  50 characters, a missing sign-off, and any trailer other than `Signed-off-by:`.
+- `pre-commit` refuses a commit on `main`, and a branch not named
+  `<type>/<short-description>`.
+- `pre-push` refuses a direct push to `main`.
+
+This is work CI cannot do. CI sees a branch only once its history is already written, and
+a malformed subject or a missing sign-off cannot be corrected after the fact without
+rewriting the branch — which is cheap before a push and disruptive after one. Catching it
+at the moment of the commit is the only point where the fix is free.
+
+`git config` is per clone, so a fresh clone needs the line again. Each hook will also run
+`.git/hooks/<name>.local` if you create one and mark it executable, which is where a
+personal check belongs; it stays inside the git directory and is never published.
+
+If a hook is wrong, fix the hook. `--no-verify` leaves the defect in the history.
+
 ## Running the tests
 
 One command, from the repository root:
@@ -123,7 +151,8 @@ Conventional Commits:
 ```
 
 Types: `feat` `fix` `docs` `style` `refactor` `perf` `test` `chore`. Present tense,
-lowercase, subject under 50 characters. The body explains why, not what — the diff already
+lowercase, subject under 50 characters. The `commit-msg` hook enforces every part of
+this that a machine can check. The body explains why, not what — the diff already
 says what.
 
 **Sign off every commit:**
