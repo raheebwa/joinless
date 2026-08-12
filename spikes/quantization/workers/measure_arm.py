@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         "--batch-sizes", required=True, help="comma-separated, e.g. 1,8,32"
     )
     parser.add_argument("--repeats", type=int, required=True)
+    parser.add_argument("--intra-op-threads", type=int, required=True)
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
 
@@ -43,8 +44,13 @@ def main(argv: list[str] | None = None) -> int:
 
     checkpoints["after_import"] = time.perf_counter()
 
+    session_options = onnxruntime.SessionOptions()
+    session_options.intra_op_num_threads = args.intra_op_threads
+    session_options.inter_op_num_threads = 1
     session = onnxruntime.InferenceSession(
-        args.model_path, providers=["CPUExecutionProvider"]
+        args.model_path,
+        sess_options=session_options,
+        providers=["CPUExecutionProvider"],
     )
     checkpoints["after_session"] = time.perf_counter()
 

@@ -44,6 +44,11 @@ BATCH_SIZES = (1, 8, 32)
 WARM_REPEATS = 20
 """Repetitions for warm single-pair scoring, after warm-up (RFC-0002 method step 2)."""
 
+THREAD_COUNT = 1
+"""Intra-op thread count each session is configured with, and the value the record
+names for both arms (PRD MR-6). Fixed rather than left to the runtime's own default so
+a difference between arms cannot be a difference in how many cores each one used."""
+
 PEAK_RSS_METHOD = (
     "resource.getrusage(RUSAGE_SELF).ru_maxrss, taken once at process exit and "
     "normalized to bytes per platform (Linux reports kibibytes, Darwin bytes)"
@@ -166,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             ",".join(str(b) for b in BATCH_SIZES),
             "--repeats",
             str(args.repeats),
+            "--intra-op-threads",
+            str(THREAD_COUNT),
             "--out",
             str(out_path),
         ]
@@ -186,7 +193,9 @@ def main(argv: list[str] | None = None) -> int:
             artifact_bytes=artifact_size_bytes(model_path),
         )
 
-    write_fragment(cache_dir, "step7_measure", arm_records)
+    write_fragment(
+        cache_dir, "step7_measure", {"thread_count": THREAD_COUNT, "arms": arm_records}
+    )
     return 0
 
 
