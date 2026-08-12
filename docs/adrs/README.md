@@ -9,7 +9,7 @@ explicitly. Superseded records are kept, not deleted — the reasoning is the po
 |---|---|---|
 | [0001](0001-greenfield-package-citing-prior-art.md) | Greenfield package; prior art cited, not forked | Accepted |
 | [0002](0002-onnx-runtime-as-inference-runtime.md) | ONNX Runtime as the on-device inference runtime | Accepted |
-| [0003](0003-classical-matcher-is-a-first-class-arm.md) | The classical matcher is a first-class arm, not a legacy path | Accepted |
+| [0003](0003-classical-matcher-is-a-first-class-arm.md) | The classical matcher is a first-class arm, not a legacy path | Accepted — arm count superseded by [0008](0008-character-aware-classical-arm.md) |
 | [0004](0004-synthetic-fixtures-only.md) | Synthetic fixtures only; no real-world corpus | Accepted |
 | [0005](0005-mit-licence.md) | MIT licence | Accepted |
 | [0006](0006-arm64-client-devices-as-target.md) | Arm64 client devices as the target platform | Accepted |
