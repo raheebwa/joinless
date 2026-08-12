@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Refuses a direct push to the default branch.
+# Installed by: git config core.hooksPath .githooks
+set -uo pipefail
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main)
+      printf 'pre-push: main is updated by merging a pull request, not by pushing.\n' >&2
+      exit 1
+      ;;
+  esac
+done
+
+ext="$(git rev-parse --git-common-dir)/hooks/pre-push.local"
+[ -x "$ext" ] && exec "$ext"
+exit 0
