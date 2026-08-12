@@ -37,6 +37,17 @@ def resolve_cache_dir(environ: Mapping[str, str]) -> Path:
     return Path(value)
 
 
+def hf_cache_dir(cache_dir: Path) -> Path:
+    """Where the raw model-host download lives, under the supplied cache directory.
+
+    Every step that touches the model host (fetching weights, loading a tokenizer)
+    points here rather than at whatever the Hugging Face client's own default cache
+    happens to be — so the *entire* fetched footprint sits under the one directory the
+    maintainer supplied, not split between it and an unrelated default location.
+    """
+    return cache_dir / "hf"
+
+
 def fragment_path(cache_dir: Path, name: str) -> Path:
     """The path a step's JSON fragment lives at, given its short name."""
     return cache_dir / f"{name}.json"

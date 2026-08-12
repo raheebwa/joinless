@@ -47,7 +47,12 @@ environment variable rather than assumed to exist:
 export JOINLESS_MODEL_CACHE_DIR=/path/to/a/writable/directory
 ```
 
-Nothing written under it is committed — it sits outside the repository tree.
+Nothing written under it is committed — it sits outside the repository tree. Every
+fetch from the model host (the raw weights in step 1, the tokenizer wherever a later
+step needs one) is pointed at `$JOINLESS_MODEL_CACHE_DIR/hf`, never at a tool's own
+default cache location — so the entire fetched footprint lives under the one directory
+supplied, and a clean value for that variable is what makes a run reproducible on a
+machine with nothing pre-cached.
 
 ## Running the protocol
 

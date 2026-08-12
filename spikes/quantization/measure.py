@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     import time
 
     from spikes.quantization.cli_common import (
+        hf_cache_dir,
         read_fragment,
         resolve_cache_dir,
         write_fragment,
@@ -167,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             arm,
             "--model-path",
             model_path,
+            "--hf-cache-dir",
+            str(hf_cache_dir(cache_dir)),
             "--batch-sizes",
             ",".join(str(b) for b in BATCH_SIZES),
             "--repeats",

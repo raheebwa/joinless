@@ -158,7 +158,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from huggingface_hub import HfApi, snapshot_download
 
-    from spikes.quantization.cli_common import resolve_cache_dir, write_fragment
+    from spikes.quantization.cli_common import (
+        hf_cache_dir,
+        resolve_cache_dir,
+        write_fragment,
+    )
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -173,7 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         PlainModelInfo(sha=raw_info.sha, card_data=card_data, tags=raw_info.tags or [])
     )
 
-    local_dir = snapshot_download(repo_id=MODEL_ID, revision=selection.revision)
+    local_dir = snapshot_download(
+        repo_id=MODEL_ID,
+        revision=selection.revision,
+        cache_dir=str(hf_cache_dir(cache_dir)),
+    )
     available = os.listdir(local_dir)
     weights_file = select_weights_file(available)
     checksum = sha256_file(Path(local_dir) / weights_file)
