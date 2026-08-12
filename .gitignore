@@ -23,3 +23,8 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Coverage artefacts
+.coverage
+.coverage.*
+htmlcov/
