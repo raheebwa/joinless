@@ -18,3 +18,5 @@ warns nobody.
 - `dev` and `neural` optional install profiles.
 - `joinless` console entry point.
 - The importable `joinless` package.
+- `export` optional install profile (torch, transformers, `optimum[onnxruntime]`,
+  onnx, huggingface_hub) for the scripted model-export tooling under `spikes/`.
