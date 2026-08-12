@@ -53,9 +53,19 @@ Three hooks then run:
 
 - `commit-msg` rejects a subject that is not `<type>(<scope>): <subject>`, a subject over
   50 characters, a missing sign-off, and any trailer other than `Signed-off-by:`.
-- `pre-commit` refuses a commit on `main`, and a branch not named
-  `<type>/<short-description>`.
+- `pre-commit` refuses a commit on `main` or on a branch not named
+  `<type>/<short-description>`, and rejects staged content that breaks a rule stated
+  elsewhere in this document: a `.py` file without its SPDX header, a `License ::`
+  classifier, a workflow missing `permissions:` or naming an action that is not pinned to
+  a 40-character commit SHA, a changelog heading whose date is not ISO 8601, a committed
+  model artefact, and a phone number that is not the `+000 000 000 000` placeholder. Once
+  `pyproject.toml` exists it also runs `ruff`, `mypy` and the test suite.
 - `pre-push` refuses a direct push to `main`.
+
+`pre-commit` judges the **staged** content, not the working tree: a partially staged file
+is committed as staged, and that is the version the rules have to hold for. The checks
+themselves live in `.githooks/checks.sh` as functions of the paths they are given, so they
+are tested against fixtures in `tests/hooks/` — a check nobody tested enforces nothing.
 
 This is work CI cannot do. CI sees a branch only once its history is already written, and
 a malformed subject or a missing sign-off cannot be corrected after the fact without
