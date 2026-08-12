@@ -13,9 +13,11 @@ import pytest
 
 from spikes.quantization.model import (
     UNRESOLVED_LICENSE,
-    FakeModelInfo,
+    WEIGHTS_FILE_PRIORITY,
+    PlainModelInfo,
     resolve_license,
     resolve_model_selection,
+    select_weights_file,
     sha256_file,
 )
 
@@ -46,7 +48,7 @@ def test_resolve_license_unresolved_when_absent() -> None:
 
 
 def test_resolve_model_selection_combines_revision_and_license() -> None:
-    info = FakeModelInfo(sha="abc123", card_data={"license": "apache-2.0"}, tags=[])
+    info = PlainModelInfo(sha="abc123", card_data={"license": "apache-2.0"}, tags=[])
 
     selection = resolve_model_selection(info)
 
@@ -57,10 +59,29 @@ def test_resolve_model_selection_combines_revision_and_license() -> None:
 
 
 def test_resolve_model_selection_rejects_unresolved_revision() -> None:
-    info = FakeModelInfo(sha=None, card_data=None, tags=[])
+    info = PlainModelInfo(sha=None, card_data=None, tags=[])
 
     with pytest.raises(ValueError, match="resolved commit sha"):
         resolve_model_selection(info)
+
+
+def test_select_weights_file_prefers_safetensors() -> None:
+    chosen = select_weights_file(
+        ["config.json", "pytorch_model.bin", "model.safetensors"]
+    )
+
+    assert chosen == WEIGHTS_FILE_PRIORITY[0] == "model.safetensors"
+
+
+def test_select_weights_file_falls_back_to_pytorch_bin() -> None:
+    chosen = select_weights_file(["config.json", "pytorch_model.bin"])
+
+    assert chosen == "pytorch_model.bin"
+
+
+def test_select_weights_file_raises_when_none_present() -> None:
+    with pytest.raises(ValueError, match="none of"):
+        select_weights_file(["config.json", "tokenizer.json"])
 
 
 def test_sha256_file_matches_hashlib(tmp_path) -> None:

@@ -55,8 +55,14 @@ class ModelInfoLike(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class FakeModelInfo:
-    """A minimal stand-in for ``ModelInfoLike``, for tests only."""
+class PlainModelInfo:
+    """A plain, dependency-free ``ModelInfoLike``.
+
+    Used two ways: as a fixture in tests, and in :func:`main` to adapt the real
+    ``huggingface_hub`` response — whose ``card_data`` is a ``ModelCardData`` object and
+    whose ``tags`` may be ``None`` — down to the shape :func:`resolve_model_selection`
+    actually needs.
+    """
 
     sha: str | None
     card_data: Mapping[str, object] | None
@@ -115,6 +121,22 @@ def resolve_model_selection(info: ModelInfoLike) -> ModelSelection:
     )
 
 
+WEIGHTS_FILE_PRIORITY = ("model.safetensors", "pytorch_model.bin")
+"""Candidate weights filenames, in the order this step prefers them.
+
+``safetensors`` first: it is the format the model card's own widget uses and it carries
+no arbitrary-code-execution risk on load, unlike a pickle-based ``.bin``.
+"""
+
+
+def select_weights_file(available: Sequence[str]) -> str:
+    """Pick the weights file to checksum out of a repository's file listing."""
+    for candidate in WEIGHTS_FILE_PRIORITY:
+        if candidate in available:
+            return candidate
+    raise ValueError(f"none of {WEIGHTS_FILE_PRIORITY} found in {sorted(available)}")
+
+
 def sha256_file(path: str | Path) -> str:
     """Checksum a fetched artefact so the record names exactly what was measured."""
     digest = hashlib.sha256()
@@ -122,3 +144,55 @@ def sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Resolve :data:`MODEL_ID` against the live model host and record step 1.
+
+    Untested: the network call to the model host and the artefact download. Everything
+    it feeds into (:func:`resolve_model_selection`, :func:`select_weights_file`,
+    :func:`sha256_file`) is pure and covered above.
+    """
+    import argparse
+    import os
+
+    from huggingface_hub import HfApi, snapshot_download
+
+    from spikes.quantization.cli_common import resolve_cache_dir, write_fragment
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--revision", default=None, help="pin a specific commit; default HEAD"
+    )
+    args = parser.parse_args(argv)
+
+    cache_dir = resolve_cache_dir(os.environ)
+    raw_info = HfApi().model_info(MODEL_ID, revision=args.revision, expand=["cardData"])
+    card_data = raw_info.card_data.to_dict() if raw_info.card_data is not None else None
+    selection = resolve_model_selection(
+        PlainModelInfo(sha=raw_info.sha, card_data=card_data, tags=raw_info.tags or [])
+    )
+
+    local_dir = snapshot_download(repo_id=MODEL_ID, revision=selection.revision)
+    available = os.listdir(local_dir)
+    weights_file = select_weights_file(available)
+    checksum = sha256_file(Path(local_dir) / weights_file)
+
+    write_fragment(
+        cache_dir,
+        "step1_model",
+        {
+            "model_id": selection.model_id,
+            "revision": selection.revision,
+            "license": selection.license,
+            "license_source": selection.license_source,
+            "weights_file": weights_file,
+            "checksum_sha256": checksum,
+            "local_dir": local_dir,
+        },
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
