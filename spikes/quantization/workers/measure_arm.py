@@ -19,6 +19,7 @@ import argparse
 import json
 import resource
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     from transformers import AutoTokenizer
 
     from spikes.quantization.model import MODEL_ID
-    from spikes.quantization.smoke import mean_pool
+    from spikes.quantization.smoke import cosine_similarity, mean_pool
 
     checkpoints["after_import"] = time.perf_counter()
 
@@ -58,9 +59,15 @@ def main(argv: list[str] | None = None) -> int:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=args.hf_cache_dir)
     checkpoints["after_tokenizer"] = time.perf_counter()
 
-    probe_text = "Sunrise Agro Traders"  # one invented smoke-set name (spikes/quantization/smoke.py)
+    # Two invented names from the smoke set (spikes/quantization/smoke.py). Scoring a
+    # pair needs both of them: RFC-0002 defines warm scoring as the cost of one
+    # comparison, and a comparison is two embeddings and the similarity between them.
+    # Timing one embedding and recording it as a pair understates the per-comparison
+    # cost by about half, under a label claiming otherwise.
+    probe_pair = ("Sunrise Agro Traders", "Sunrise Agro Trading Company")
+    probe_text = probe_pair[0]
 
-    def embed_batch(texts: list[str]) -> None:
+    def embed_batch(texts: list[str]) -> list[Sequence[float]]:
         encoded = tokenizer(texts, padding=True, truncation=True, return_tensors="np")
         feed = {
             name: encoded[name]
@@ -70,16 +77,21 @@ def main(argv: list[str] | None = None) -> int:
         outputs = session.run(None, feed)
         token_embeddings = outputs[0]
         attention_mask = encoded["attention_mask"]
-        for i in range(len(texts)):
-            mean_pool(token_embeddings[i], attention_mask[i])
+        return [
+            mean_pool(token_embeddings[i], attention_mask[i]) for i in range(len(texts))
+        ]
 
-    embed_batch([probe_text])  # first inference: outside every timed loop below
+    def score_pair() -> float:
+        left, right = embed_batch(list(probe_pair))
+        return cosine_similarity(left, right)
+
+    score_pair()  # first inference: outside every timed loop below
     checkpoints["after_first_inference"] = time.perf_counter()
 
     single_pair_latencies = []
     for _ in range(args.repeats):
         start = time.perf_counter()
-        embed_batch([probe_text])
+        score_pair()
         single_pair_latencies.append(time.perf_counter() - start)
 
     batched_latencies: dict[str, list[float]] = {}
