@@ -42,6 +42,9 @@ BATCH_SIZES = (1, 8, 32)
 """Documented batch sizes for warm batched preparation (RFC-0004 step 7)."""
 
 WARM_REPEATS = 20
+# One untimed inference precedes every timed loop in the worker. RFC-0002 names
+# warm-up count as a recorded field, so it is written down rather than implied.
+WARMUP_COUNT = 1
 """Repetitions for warm single-pair scoring, after warm-up (RFC-0002 method step 2)."""
 
 THREAD_COUNT = 1
@@ -197,7 +200,14 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     write_fragment(
-        cache_dir, "step7_measure", {"thread_count": THREAD_COUNT, "arms": arm_records}
+        cache_dir,
+        "step7_measure",
+        {
+            "thread_count": THREAD_COUNT,
+            "warmup_count": WARMUP_COUNT,
+            "repeats": args.repeats,
+            "arms": arm_records,
+        },
     )
     return 0
 

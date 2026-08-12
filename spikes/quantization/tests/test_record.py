@@ -144,3 +144,13 @@ def test_assemble_spike_record_never_lets_an_unlisted_key_through() -> None:
 
     assert "HF_TOKEN" not in serialized
     assert "do-not-leak-this-token" not in serialized
+
+
+def test_platform_facts_carry_total_memory() -> None:
+    """benchmarks/README.md requires 'Hardware — CPU, core count, memory'. Without a
+    memory figure a reader cannot evaluate ADR-0009's argument that a model this small
+    may already be resident in cache."""
+    facts = capture_platform_facts()
+    assert "total_memory_bytes" in facts
+    value = facts["total_memory_bytes"]
+    assert value is None or (isinstance(value, int) and value > 0)
