@@ -42,6 +42,10 @@ for t in "$root"/tests/hooks/*.test.sh; do
 done
 
 # Once the package is installable, its own gates apply to every commit.
+# A hook runs in whatever shell git invokes, which is not necessarily one where
+# the project environment is activated, so look in the documented location too.
+[ -d "$root/.venv/bin" ] && PATH="$root/.venv/bin:$PATH"
+
 if [ -f "$root/pyproject.toml" ]; then
   missing=""
   for t in ruff mypy pytest; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
