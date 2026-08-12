@@ -40,3 +40,16 @@ updates:
         dependency-type: "development"
         patterns:
           - "*"
+    # optimum-onnx, reached through optimum[onnxruntime] in the export extra, requires
+    # transformers<4.58, so no 5.x release of transformers can be installed alongside it.
+    # Proposing one is not a risky update, it is an unsatisfiable one: the resolver
+    # refuses the whole set and the update run fails rather than opening a pull request.
+    # Minor and patch updates are left alone and still arrive.
+    #
+    # The cap belongs to optimum-onnx, not to this project, so it is not restated as an
+    # upper bound in pyproject.toml. An upper bound there would be published metadata
+    # constraining anyone who installs the package, and it would go stale silently the
+    # moment optimum-onnx widens its own range. Drop this rule when it does.
+    ignore:
+      - dependency-name: "transformers"
+        update-types: ["version-update:semver-major"]
