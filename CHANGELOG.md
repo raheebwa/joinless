@@ -22,3 +22,10 @@ warns nobody.
   onnx, huggingface_hub) for the scripted model-export tooling under `spikes/`.
 - `rapidfuzz` as a runtime dependency, carrying the character-aware classical arm.
 - Full line and branch coverage as an enforced floor rather than a reported number.
+- `joinless.records` — `Record`, and a dual hashing scheme giving every row a stable
+  identifier that does not collapse same-named rows carrying no coordinates.
+- `joinless.scoring` — the `Scorer` protocol, the `ThresholdMatcher` adapter, and the
+  `overlap` and `fuzzy` classical arms, selectable by name.
+- `joinless.corpus` — a deterministic synthetic corpus over the eight perturbation
+  families, split into three disjoint roles.
+- `joinless.resolver` — `resolve`, merging two record sets that share no key.
