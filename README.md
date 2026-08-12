@@ -1,7 +1,17 @@
 # joinless
 
+[![CI](https://github.com/raheebwa/joinless/actions/workflows/ci.yml/badge.svg)](https://github.com/raheebwa/joinless/actions/workflows/ci.yml)
+[![Coverage 100%](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/raheebwa/joinless/actions/workflows/ci.yml)
+[![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Project Status: Concept – Minimal or no implementation has been done yet, or the repository is only intended to be a limited example, demo, or proof-of-concept.](https://www.repostatus.org/badges/latest/concept.svg)](https://www.repostatus.org/#concept)
+
+The coverage badge states an **enforced floor**, not a measured number reported by a
+service. `pytest` is configured with `fail_under = 100` over line *and* branch coverage, so
+the figure is either 100% or the build above it is red. Nothing is uploaded anywhere to
+produce it — see
+[ADR-0016](docs/adrs/0016-tests-assert-behaviour-and-cover-every-path.md), which also
+explains why a coverage floor is a completeness check rather than a quality one.
 
 **Record linkage when there is no join key — and a measured answer to whether a neural matcher is worth it on-device.**
 
