@@ -18,9 +18,14 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+
+# The model host returns only the fields named here. "sha" is not implied: without it
+# the response carries no revision, and step 1 refuses to record a selection it cannot
+# pin (ADR-0013). The revision is what makes this selection reproducible.
+MODEL_INFO_FIELDS: Final = ("cardData", "sha")
 """The one model this spike measures.
 
 A 22M-parameter stock sentence encoder — small enough that ADR-0009 names this exact
@@ -171,7 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cache_dir = resolve_cache_dir(os.environ)
-    raw_info = HfApi().model_info(MODEL_ID, revision=args.revision, expand=["cardData"])
+    raw_info = HfApi().model_info(
+        MODEL_ID, revision=args.revision, expand=list(MODEL_INFO_FIELDS)
+    )
     card_data = raw_info.card_data.to_dict() if raw_info.card_data is not None else None
     selection = resolve_model_selection(
         PlainModelInfo(sha=raw_info.sha, card_data=card_data, tags=raw_info.tags or [])

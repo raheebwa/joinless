@@ -60,7 +60,9 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0.0 or norm_b == 0.0:
         raise ValueError("cosine similarity is undefined for a zero vector")
-    return dot / (norm_a * norm_b)
+    # float() is load-bearing: at run time these are numpy scalars, which are not
+    # JSON serializable, and the record this feeds is written as JSON.
+    return float(dot / (norm_a * norm_b))
 
 
 def mean_pool(
@@ -71,7 +73,7 @@ def mean_pool(
     Padding tokens carry an embedding but no meaning; including them would bias the
     pooled vector toward the padding scheme rather than the text.
     """
-    dim = len(token_embeddings[0]) if token_embeddings else 0
+    dim = len(token_embeddings[0]) if len(token_embeddings) else 0
     sums = [0.0] * dim
     count = 0
     for vector, mask in zip(token_embeddings, attention_mask, strict=True):

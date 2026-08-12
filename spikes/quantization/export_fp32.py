@@ -24,7 +24,6 @@ from spikes.quantization.cli_common import (
     resolve_cache_dir,
     write_fragment,
 )
-from spikes.quantization.model import MODEL_ID
 
 EXPORT_TOOL_PACKAGES = ("torch", "transformers", "optimum", "onnx")
 """The export-time tools whose versions the record names (RFC-0004 step 2).
@@ -37,8 +36,7 @@ DEFAULT_TASK = "feature-extraction"
 
 
 def build_export_command(
-    model_id: str,
-    revision: str,
+    model_path: str,
     output_dir: Path,
     *,
     task: str = DEFAULT_TASK,
@@ -56,9 +54,7 @@ def build_export_command(
         "export",
         "onnx",
         "--model",
-        model_id,
-        "--revision",
-        revision,
+        model_path,
         "--task",
         task,
     ]
@@ -98,8 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = cache_dir / "fp32"
 
     command = build_export_command(
-        model_id=str(selection.get("model_id", MODEL_ID)),
-        revision=str(selection["revision"]),
+        # Export from the snapshot step 1 already pinned and fetched. `optimum-cli
+        # export onnx` has no --revision flag, and pointing it at the hub id would
+        # export whatever HEAD is now — a different model from the one recorded.
+        model_path=str(selection["local_dir"]),
         output_dir=output_dir,
         task=args.task,
         cache_dir=hf_cache_dir(cache_dir),

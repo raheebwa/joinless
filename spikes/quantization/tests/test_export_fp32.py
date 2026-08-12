@@ -16,10 +16,12 @@ from spikes.quantization.export_fp32 import (
 )
 
 
-def test_build_export_command_names_model_revision_task_and_output() -> None:
+def test_build_export_command_names_the_pinned_snapshot_task_and_output() -> None:
+    """The model is the local snapshot step 1 pinned, not the hub id: `optimum-cli
+    export onnx` has no --revision flag, so naming the hub id would export whatever
+    HEAD happens to be — a different model from the one step 1 recorded."""
     command = build_export_command(
-        model_id="sentence-transformers/all-MiniLM-L6-v2",
-        revision="deadbeef",
+        model_path="/cache/hf/snapshots/deadbeef",
         output_dir=Path("/cache/fp32"),
     )
 
@@ -28,19 +30,17 @@ def test_build_export_command_names_model_revision_task_and_output() -> None:
         "export",
         "onnx",
         "--model",
-        "sentence-transformers/all-MiniLM-L6-v2",
-        "--revision",
-        "deadbeef",
+        "/cache/hf/snapshots/deadbeef",
         "--task",
         "feature-extraction",
         "/cache/fp32",
     ]
+    assert "--revision" not in command
 
 
 def test_build_export_command_accepts_a_different_task() -> None:
     command = build_export_command(
-        model_id="m",
-        revision="r",
+        model_path="/snap",
         output_dir=Path("/o"),
         task="sentence-similarity",
     )
@@ -72,8 +72,7 @@ def test_build_export_command_routes_the_fetch_to_the_cache_dir() -> None:
     time, outside the directory the maintainer supplied and nominated as the whole
     footprint of the run."""
     command = build_export_command(
-        "some-org/some-model",
-        "abc123",
+        "/local/snapshot",
         Path("/tmp/out"),
         cache_dir=Path("/tmp/cache/hf"),
     )

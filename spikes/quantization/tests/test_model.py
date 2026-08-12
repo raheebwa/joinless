@@ -90,3 +90,14 @@ def test_sha256_file_matches_hashlib(tmp_path) -> None:
     target.write_bytes(payload)
 
     assert sha256_file(target) == hashlib.sha256(payload).hexdigest()
+
+
+def test_model_info_fields_request_the_commit_sha() -> None:
+    """The model host returns only the fields named in `expand`. Omitting "sha" makes
+    `info.sha` None, which resolve_model_selection correctly refuses — so step 1 fails
+    with no revision rather than recording a wrong one. The revision is the whole point
+    of step 1, so it has to be asked for."""
+    from spikes.quantization.model import MODEL_INFO_FIELDS
+
+    assert "sha" in MODEL_INFO_FIELDS
+    assert "cardData" in MODEL_INFO_FIELDS
