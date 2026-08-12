@@ -1,4 +1,4 @@
-# ADR-0015 — Contribution rules are enforced at the commit, not only in review
+# ADR-0015 — The project's rules are enforced locally, not only in review
 
 **Status:** Accepted · **Date:** 2026-08-12
 
@@ -42,8 +42,47 @@ file is committed as staged and that is the version the rules must hold for.
 Each hook runs `.git/hooks/<name>.local` when one exists and is executable, so a contributor
 can add a personal check without modifying a tracked file.
 
+## Decision — the toolchain
+
+The reference interpreter is pinned in `mise.toml` and the dependency set is locked.
+
+```toml
+[tools]
+python = "3.14.5"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+```
+
+The reasoning is the same as above, applied to a different rule. PRD MR-6 requires the
+Python and runtime versions to be recorded with every run, and PRD §9 names runtime version
+differences as a way the reported numbers move. Recording a version after the fact
+describes what happened; pinning it is what lets a second machine match it. An interpreter
+that follows whatever the system package manager last installed is not a reference.
+
+Dependencies are declared in two layers, because they answer two different questions:
+
+- `pyproject.toml` declares **lower bounds only**. This is a library, and a library that
+  pins exact versions dictates resolution to everyone who installs it.
+- The lock file records the **exact** versions the reference environment resolved to. That
+  is what makes a run record reproducible rather than merely descriptive.
+
+The pin is not the supported range. `requires-python` admits 3.11 and later and CI tests
+every version in that range; that is what establishes portability. The pin names the one
+interpreter the reference machine uses, which is a separate question, and narrowing the CI
+matrix to match it would be a mistake.
+
+Export-time tooling is not the inference runtime. Anything needed to produce a model
+artefact belongs in its own group rather than in `neural`, because `neural` names the
+runtime whose cost the benchmark measures and folding a build-time dependency into it would
+make that measurement mean something else.
+
 ## Consequences
 
+- A pinned interpreter that the toolchain manager cannot install is not a pin. The version
+  chosen here resolves to a standard build; a freethreaded build would be a different
+  interpreter with different performance characteristics, and selecting one by accident
+  would change every measured number without changing any documented decision.
 - Enforcement is per clone, because `git config` is per clone. A contributor who has not run
   the line is unprotected, so **CI remains the authority** and the hooks are the earlier,
   cheaper of two gates rather than a replacement for the later one.
@@ -71,6 +110,15 @@ rules to be implemented separately regardless.
 `dev` extra and therefore cannot run until the package is installed. A fresh clone, which is
 where a first commit is most likely to be malformed, is exactly the state in which it is
 absent. It also covers only the message, so it reduces rather than removes the shell.
+
+**A version range for the reference interpreter.** A range is the right answer for
+`requires-python`, which describes what the package supports. It is the wrong answer for the
+machine that produces published figures, where the whole point is that two runs used the
+same thing.
+
+**Pinning exact versions in `pyproject.toml` instead of a lock file.** It would make the
+reference set reproducible and simultaneously impose it on every downstream installation,
+which is not this project's business.
 
 **The pre-commit framework.** It manages hook environments, which is valuable when hooks have
 dependencies. These have none: they are a few lines of shell over `git` and `grep`. Adopting

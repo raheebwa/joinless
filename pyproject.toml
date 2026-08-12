@@ -17,5 +17,5 @@ dependencies = []
 joinless = "joinless.cli:main"
 
 [project.optional-dependencies]
-dev = ["ruff", "mypy", "pytest"]
-neural = ["onnxruntime"]
+dev = ["ruff>=0.16", "mypy>=2.3", "pytest>=9.1"]
+neural = ["onnxruntime>=1.28"]

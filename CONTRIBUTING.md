@@ -19,7 +19,26 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Use a Python version satisfying `requires-python` in `pyproject.toml`.
+Use a Python version satisfying `requires-python` in `pyproject.toml`. Any version in that
+range works and CI tests all of them.
+
+Published figures are produced on one pinned interpreter rather than any version in the
+range, because a measurement is only comparable to another measurement made the same way.
+That pin is declared in `mise.toml` and applied by [mise](https://mise.jdx.dev):
+
+```sh
+mise trust
+mise install
+```
+
+`mise trust` is required because a project configuration can set environment variables, so
+the tool will not read one until you say it may. Using mise is optional for contributing
+and expected for producing a benchmark record — see
+[ADR-0015](docs/adrs/0015-local-enforcement-of-contribution-rules.md).
+
+`pyproject.toml` declares lower bounds; `uv.lock` records the exact versions the reference
+environment resolved to. Change a bound in the manifest, then regenerate the lock — never
+edit the lock by hand.
 
 That is the base profile — the resolver, the `Matcher` protocol, the `overlap` and `fuzzy`
 arms, the benchmark harness and the CLI — plus the tooling used to develop them. The
