@@ -11,7 +11,10 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "Aheebwa Ramadhan" }]
-dependencies = []
+# rapidfuzz carries the character-aware classical arm (ADR-0008), which ADR-0014
+# places in the base profile. A lower bound only: the exact resolved version is
+# recorded in uv.lock.
+dependencies = ["rapidfuzz>=3.10"]
 
 [project.scripts]
 joinless = "joinless.cli:main"
