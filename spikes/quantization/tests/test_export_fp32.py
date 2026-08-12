@@ -64,3 +64,18 @@ def test_capture_tool_versions_omits_a_package_that_is_not_installed() -> None:
 
     assert "torch" not in versions
     assert versions["onnx"] == "1.0"
+
+
+def test_build_export_command_routes_the_fetch_to_the_cache_dir() -> None:
+    """Step 1 fetches into the supplied cache directory; step 2 shells out to a tool
+    with its own default cache. Without --cache_dir the weights are fetched a second
+    time, outside the directory the maintainer supplied and nominated as the whole
+    footprint of the run."""
+    command = build_export_command(
+        "some-org/some-model",
+        "abc123",
+        Path("/tmp/out"),
+        cache_dir=Path("/tmp/cache/hf"),
+    )
+    assert "--cache_dir" in command
+    assert command[command.index("--cache_dir") + 1] == "/tmp/cache/hf"

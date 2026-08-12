@@ -19,6 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from spikes.quantization.cli_common import (
+    hf_cache_dir,
     read_fragment,
     resolve_cache_dir,
     write_fragment,
@@ -41,9 +42,16 @@ def build_export_command(
     output_dir: Path,
     *,
     task: str = DEFAULT_TASK,
+    cache_dir: Path | None = None,
 ) -> list[str]:
-    """The exact ``optimum-cli`` invocation this step records and runs."""
-    return [
+    """The exact ``optimum-cli`` invocation this step records and runs.
+
+    ``cache_dir`` is passed through because this step shells out to a tool with its
+    own default cache. Without it the weights step 1 already fetched are fetched a
+    second time, outside the directory the maintainer supplied — so deleting that
+    directory afterwards would not undo what the run put on the machine.
+    """
+    command = [
         "optimum-cli",
         "export",
         "onnx",
@@ -53,8 +61,11 @@ def build_export_command(
         revision,
         "--task",
         task,
-        str(output_dir),
     ]
+    if cache_dir is not None:
+        command += ["--cache_dir", str(cache_dir)]
+    command.append(str(output_dir))
+    return command
 
 
 def capture_tool_versions(
@@ -91,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         revision=str(selection["revision"]),
         output_dir=output_dir,
         task=args.task,
+        cache_dir=hf_cache_dir(cache_dir),
     )
     subprocess.run(command, check=True)
 

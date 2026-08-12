@@ -40,6 +40,19 @@ def capture_allowed_env(environ: Mapping[str, str]) -> dict[str, str]:
     return {key: environ[key] for key in ALLOWED_ENV_KEYS if key in environ}
 
 
+def total_memory_bytes() -> int | None:
+    """Total physical memory, or None where the platform does not report it.
+
+    None rather than 0: benchmarks/README.md requires memory, and a zero would be a
+    claim about the machine rather than an admission that it was not measured
+    (ADR-0013).
+    """
+    try:
+        return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
 def capture_platform_facts() -> dict[str, object]:
     """Hardware and OS facts from the stdlib ``platform`` module — not from any
     environment variable, so nothing here needs an allow-list of its own."""
@@ -49,6 +62,7 @@ def capture_platform_facts() -> dict[str, object]:
         "release": platform.release(),
         "python_version": platform.python_version(),
         "cpu_count": os.cpu_count(),
+        "total_memory_bytes": total_memory_bytes(),
     }
 
 
