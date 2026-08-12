@@ -29,3 +29,6 @@ warns nobody.
 - `joinless.corpus` — a deterministic synthetic corpus over the eight perturbation
   families, split into three disjoint roles.
 - `joinless.resolver` — `resolve`, merging two record sets that share no key.
+- `joinless resolve`, `joinless compare` and `joinless doctor` on the command line.
+  `doctor` reports architecture, execution provider, installed profile and offline status,
+  so the Arm64, CPU-only and no-network properties are checkable rather than asserted.
