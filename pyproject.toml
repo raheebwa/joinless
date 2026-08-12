@@ -30,3 +30,9 @@ export = [
     "onnx>=1.16",
     "huggingface_hub>=0.25",
 ]
+
+# onnxruntime ships no py.typed marker, so mypy cannot see through it regardless of
+# which module imports it (ADR-0002).
+[[tool.mypy.overrides]]
+module = ["onnxruntime.*"]
+ignore_missing_imports = true
