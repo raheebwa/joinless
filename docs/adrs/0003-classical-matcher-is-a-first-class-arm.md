@@ -2,6 +2,12 @@
 
 **Status:** Accepted · **Date:** 2026-08-12
 
+**Superseded in part by ADR-0008.** The consequence below reading *"Carrying two
+implementations forever is a real maintenance cost"* assumed one classical implementation
+next to the neural family. ADR-0008 adds a second classical implementation (`fuzzy`),
+making it three implementations, four arms. The decision and the rest of this record's
+reasoning are unaffected; only that count is superseded.
+
 ## Context
 
 Once an embedding matcher exists, the obvious move is to treat the token-overlap matcher
