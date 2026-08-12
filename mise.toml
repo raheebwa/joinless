@@ -1,0 +1,19 @@
+# The toolchain a published measurement is produced on.
+#
+# PRD MR-6 requires the Python version to be recorded with every run, and the risk
+# table in PRD §9 names runtime version differences as a way the reported numbers
+# move. An interpreter that follows whatever the system package manager last
+# installed is not a reference; pinning it is what makes a run record mean
+# something a second machine can match.
+#
+# This pin is not the supported range. `requires-python` in pyproject.toml admits
+# 3.11 and later and CI tests every version in that range, which is what
+# establishes portability. The pin names the single interpreter the reference
+# machine uses, which is a different question.
+[tools]
+python = "3.14.5"
+
+[env]
+# Use the project environment on entering the directory, so the interpreter in play
+# is the pinned one rather than whichever happens to be earlier on PATH.
+_.python.venv = { path = ".venv", create = true }
