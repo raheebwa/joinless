@@ -18,16 +18,16 @@ joinless = "joinless.cli:main"
 
 [project.optional-dependencies]
 dev = ["ruff>=0.16", "mypy>=2.3", "pytest>=9.1"]
-neural = ["onnxruntime>=1.28"]
+neural = ["onnxruntime>=1.28", "onnx>=1.22"]
 # Build-time tooling for producing model artefacts (spikes/quantization/), kept out of
 # `neural` because that extra names the inference runtime whose cost the benchmark
 # measures — folding export tooling into it would change what the measurement means
-# (ADR-0015). Nothing under joinless/ depends on this group.
+# (ADR-0014). Nothing under joinless/ depends on this group.
 export = [
     "torch>=2.4",
     "transformers>=4.44",
     "optimum[onnxruntime]>=1.22",
-    "onnx>=1.16",
+    "onnx>=1.22",
     "huggingface_hub>=0.25",
 ]
 
