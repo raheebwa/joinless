@@ -1,0 +1,276 @@
+# Correctness and hygiene only. Published performance figures come from recorded runs
+# in benchmarks/ on named hardware, never from a shared CI runner.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: Repository metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Actions are pinned to a commit SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag is mutable, so pinning to one pins to nothing. Every `uses:` must
+          # name a full 40-character commit, with the human-readable version in a
+          # trailing comment.
+          unpinned=$(
+            grep -rnE '^[[:space:]]*(-[[:space:]]*)?uses:' .github \
+              | grep -vE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]|$)' \
+              || true
+          )
+          if [ -n "$unpinned" ]; then
+            echo "::error::Action reference is not pinned to a 40-character commit SHA"
+            echo "$unpinned"
+            exit 1
+          fi
+
+      - name: Workflows declare a permissions scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Without an explicit block a workflow inherits the repository default,
+          # which is broader than any job here needs. Both spellings of the
+          # extension are workflow files to GitHub, so both are checked.
+          shopt -s nullglob
+          status=0
+          for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+            if ! grep -qE '^permissions:' "$workflow"; then
+              echo "::error file=$workflow::no top-level permissions block"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Licence metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          # PEP 639 replaced both the trove classifier and the table forms of
+          # `license` with an SPDX expression. Build back-ends may reject a project
+          # that carries the old and the new spelling together.
+          [ -f pyproject.toml ] || exit 0
+          status=0
+          if grep -nE '"License ::' pyproject.toml; then
+            echo "::error file=pyproject.toml::remove the License :: classifier; use the license expression"
+            status=1
+          fi
+          if grep -nE '^[[:space:]]*license[[:space:]]*=[[:space:]]*\{' pyproject.toml; then
+            echo "::error file=pyproject.toml::license must be an SPDX expression, not a table"
+            status=1
+          fi
+          exit "$status"
+
+      - name: Licence headers on source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          # One machine-readable line that survives a single file being copied out.
+          status=0
+          while IFS= read -r source; do
+            [ -f "$source" ] || continue
+            if ! head -n 5 "$source" | grep -qxE '# SPDX-License-Identifier: MIT'; then
+              echo "::error file=$source::missing SPDX-License-Identifier header"
+              status=1
+            fi
+          done < <(git ls-files '*.py')
+          exit "$status"
+
+      - name: Changelog format
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep a Changelog 1.1.0: an [Unreleased] section from day one, ISO dates,
+          # and exactly six section types.
+          [ -f CHANGELOG.md ] || exit 0
+          status=0
+          if ! grep -qxE '## \[Unreleased\]' CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no ## [Unreleased] section"
+            status=1
+          fi
+          bad_versions=$(
+            grep -nE '^## ' CHANGELOG.md \
+              | grep -vE '^[0-9]+:## \[Unreleased\]$' \
+              | grep -vE '^[0-9]+:## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}( \[YANKED\])?$' \
+              || true
+          )
+          if [ -n "$bad_versions" ]; then
+            echo "::error file=CHANGELOG.md::version heading must read '## [X.Y.Z] - YYYY-MM-DD'"
+            echo "$bad_versions"
+            status=1
+          fi
+          bad_sections=$(
+            grep -nE '^### ' CHANGELOG.md \
+              | grep -vE '^[0-9]+:### (Added|Changed|Deprecated|Removed|Fixed|Security)$' \
+              || true
+          )
+          if [ -n "$bad_sections" ]; then
+            echo "::error file=CHANGELOG.md::section must be Added, Changed, Deprecated, Removed, Fixed or Security"
+            echo "$bad_sections"
+            status=1
+          fi
+          exit "$status"
+
+  surface:
+    name: Detect project surface
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.probe.outputs.package }}
+      python-versions: ${{ steps.probe.outputs.python-versions }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Probe for an installable package
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f pyproject.toml ]; then
+            {
+              echo "package=false"
+              echo 'python-versions=[]'
+            } >> "$GITHUB_OUTPUT"
+            echo "No package manifest; the lint, type and test jobs do not apply."
+            exit 0
+          fi
+          python3 -m pip install --quiet --disable-pip-version-check packaging
+          # The interpreter matrix is derived from requires-python so the two cannot
+          # drift apart.
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import pathlib
+          import tomllib
+
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+
+          CANDIDATES = ("3.11", "3.12", "3.13", "3.14")
+
+          manifest = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          specifier = SpecifierSet(manifest.get("project", {}).get("requires-python", ""))
+          supported = [v for v in CANDIDATES if Version(f"{v}.0") in specifier]
+          if not supported:
+              raise SystemExit(
+                  f"requires-python {specifier!s} matches none of {CANDIDATES}; "
+                  "widen the bound or extend the candidate list"
+              )
+          print("package=true")
+          print(f"python-versions={json.dumps(supported)}")
+          PY
+
+  lint:
+    name: Lint and format
+    needs: surface
+    if: needs.surface.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ fromJSON(needs.surface.outputs.python-versions)[0] }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the base profile
+        # The command CONTRIBUTING.md gives a contributor to run locally. Style and
+        # formatting are read off the source, so the inference runtime is not needed.
+        run: python -m pip install -e ".[dev]"
+
+      - name: Check style
+        run: python -m ruff check .
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+  types:
+    name: Type check
+    needs: surface
+    if: needs.surface.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ fromJSON(needs.surface.outputs.python-versions)[0] }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install every profile
+        # Type checking covers the embedding arms too, and a module whose imports
+        # are absent is reported as an error rather than checked.
+        run: python -m pip install -e ".[dev,neural]"
+
+      - name: Check types
+        run: python -m mypy .
+
+  test:
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.install-profile }})
+    needs: surface
+    if: needs.surface.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.surface.outputs.python-versions) }}
+        # The two install profiles CONTRIBUTING.md documents. The base profile is
+        # the one in which ONNX Runtime is not importable, which is what makes the
+        # classical-only execution path assertable rather than merely claimed.
+        install-profile: ["dev", "dev,neural"]
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the profile under test
+        env:
+          INSTALL_PROFILE: ${{ matrix.install-profile }}
+        run: python -m pip install -e ".[$INSTALL_PROFILE]"
+
+      - name: Run the test suite
+        # The same command CONTRIBUTING.md gives a contributor to run locally.
+        run: python -m pytest

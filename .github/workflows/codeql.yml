@@ -1,0 +1,71 @@
+# Static analysis of the Python sources. Findings are fixed, not annotated away.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published query reaches the code without waiting for a push.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  surface:
+    name: Detect analysable sources
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.probe.outputs.python }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Probe for Python sources
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          # CodeQL fails when a database is built over an empty source tree, so the
+          # analysis is conditioned on there being something to analyse.
+          if [ -n "$(git ls-files '*.py')" ]; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python=false" >> "$GITHUB_OUTPUT"
+            echo "No Python sources; analysis does not apply."
+          fi
+
+  analyze:
+    name: Analyze (python)
+    needs: surface
+    if: needs.surface.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          languages: python
+          build-mode: none
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          category: "/language:python"

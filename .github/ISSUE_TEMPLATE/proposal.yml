@@ -1,0 +1,91 @@
+name: Proposal
+description: Propose a change to behaviour, interfaces, packaging, or the benchmark protocol.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Anything that changes a public interface, adds a matcher arm, or alters how
+        results are produced or reported is a design change. Design changes are written
+        down as an RFC in `docs/rfcs/` before any code is written, so that the reasoning
+        and the rejected alternatives survive alongside the implementation.
+
+        This issue is where a proposal is discussed and shaped. Open it first; the RFC
+        follows once the shape is agreed.
+
+        Scope is set by `docs/prd.md` §4 and §10. Fine-tuning, a model zoo, GPU or NPU
+        execution providers, and distributed execution are out of scope by decision, not
+        by omission.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What does this change touch
+      options:
+        - A public interface or protocol
+        - A matcher arm
+        - The benchmark or evaluation protocol
+        - Fixtures or the evaluation corpus
+        - Packaging, installation, or the command-line surface
+        - Documentation only
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What currently goes wrong, or what cannot be expressed. Describe the situation,
+        not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What you want to change, and what the behaviour would be afterwards.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >-
+        Other ways of solving the same problem, and why each is worse on its merits. An
+        RFC is expected to carry this section, so it starts here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: records
+    attributes:
+      label: Related records
+      description: >-
+        Which ADRs in `docs/adrs/` or RFCs in `docs/rfcs/` this would implement, amend,
+        or contradict. Write `none` if it touches none of them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurement
+    attributes:
+      label: Effect on published figures
+      description: >-
+        Whether this would change any number already recorded in `benchmarks/`, and if
+        so which. Leave blank if it would not.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and RFCs, and this is not already proposed.
+          required: true
+        - label: I have read `docs/prd.md` §4 and §10 and this is not out of scope there.
+          required: true

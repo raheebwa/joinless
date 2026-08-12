@@ -1,0 +1,15 @@
+# A report about a measured number is only usable if it names the architecture, OS,
+# Python version and the run record it came from, and a proposal is only discussable
+# if it states the alternatives it rejects. A blank issue collects none of that, and
+# the missing fields are the ones that are hardest to obtain afterwards — so the two
+# forms are the only routes in. Suspected vulnerabilities go through private
+# vulnerability reporting instead; SECURITY.md describes it.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a suspected vulnerability
+    url: https://github.com/raheebwa/joinless/security/advisories/new
+    about: >-
+      Private vulnerability reporting. A public issue is a public disclosure, and it
+      starts the clock for everyone using the package before there is an upgrade to
+      move to.

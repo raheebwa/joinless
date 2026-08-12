@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  # Actions are pinned to commit SHAs, which are immutable and therefore never
+  # pick up a fix on their own. Dependabot rewrites the SHA and the version
+  # comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # pyproject.toml at the repository root is the single declaration of runtime and
+  # development dependencies, so the root is the only directory to watch. Runtime and
+  # development updates are grouped separately because they carry different risk: one
+  # reaches anyone who installs the package, the other only this repository.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    cooldown:
+      default-days: 7
+    groups:
+      runtime:
+        dependency-type: "production"
+        patterns:
+          - "*"
+      development:
+        dependency-type: "development"
+        patterns:
+          - "*"

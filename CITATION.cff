@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite it using the metadata from this
+  file.
+type: software
+title: joinless
+abstract: >-
+  Record linkage for datasets that share no join key. Four interchangeable
+  name matchers — two classical, two embedding-based — behind one interface,
+  and a benchmark that asks what the embedding arms cost on an Arm64 client:
+  cold start, warm scoring, resident memory and artifact size.
+authors:
+  - family-names: Aheebwa
+    given-names: Ramadhan
+    email: hello@badrama.com
+    website: https://badrama.com/
+license: MIT
+repository-code: https://github.com/raheebwa/joinless
+url: https://github.com/raheebwa/joinless

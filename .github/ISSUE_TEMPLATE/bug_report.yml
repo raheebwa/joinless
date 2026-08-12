@@ -1,0 +1,125 @@
+name: Bug report
+description: Report incorrect behaviour, a crash, or a number that does not reproduce.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a suspected security vulnerability, do not open an issue. Use the
+        repository's private vulnerability reporting — the **Security and quality**
+        tab, then **Report a vulnerability** — as described in `SECURITY.md`.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: The behaviour you observed, and the behaviour you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce it
+      description: >-
+        The exact command, and the smallest input that shows the problem. Fixtures in
+        this project are synthetic — please do not paste records describing real people
+        or businesses.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      description: >-
+        Results are platform-specific. A report without an architecture cannot be
+        attributed to a machine.
+      options:
+        - arm64 (Apple Silicon)
+        - arm64 (Linux)
+        - arm64 (Windows)
+        - x86-64
+        - Other — name it under "What happened"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      placeholder: "macOS 15.5 · Ubuntu 24.04 · Windows 11 24H2"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: The output of `python --version`.
+      placeholder: "3.13.2"
+    validations:
+      required: true
+
+  - type: input
+    id: run-record
+    attributes:
+      label: Benchmark run record
+      description: >-
+        The file name of the record in `benchmarks/` that the figures in this report
+        come from. Enter `none` if the report is not about a published figure.
+      placeholder: "none"
+    validations:
+      required: true
+
+  - type: input
+    id: package-version
+    attributes:
+      label: joinless version
+      description: A released version, or the commit you are on.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arm
+    attributes:
+      label: Matcher arm
+      description: Which arm the behaviour appears on, if it is arm-specific.
+      options:
+        - Not arm-specific
+        - overlap
+        - fuzzy
+        - embed-fp32
+        - embed-int8
+    validations:
+      required: false
+
+  - type: textarea
+    id: runtime-versions
+    attributes:
+      label: Runtime versions
+      description: >-
+        Versions of the installed dependencies that are involved — for the embedding
+        arms, ONNX Runtime and the model identity and revision.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Any traceback or output, pasted whole rather than summarised.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and this is not already reported.
+          required: true
+        - label: The input above contains no real personal or business records.
+          required: true
