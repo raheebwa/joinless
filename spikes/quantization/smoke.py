@@ -131,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     from transformers import AutoTokenizer
 
     from spikes.quantization.cli_common import (
+        hf_cache_dir,
         read_fragment,
         resolve_cache_dir,
         write_fragment,
@@ -145,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     call = quantize_record["call"]
     assert isinstance(call, dict)
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_ID, cache_dir=str(hf_cache_dir(cache_dir))
+    )
     fp32_session = onnxruntime.InferenceSession(
         str(call["model_input"]), providers=["CPUExecutionProvider"]
     )

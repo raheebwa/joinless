@@ -10,6 +10,7 @@ import pytest
 from spikes.quantization.cli_common import (
     CACHE_DIR_ENV_VAR,
     CacheDirNotSetError,
+    hf_cache_dir,
     read_fragment,
     resolve_cache_dir,
     write_fragment,
@@ -44,3 +45,7 @@ def test_write_then_read_fragment_round_trips(tmp_path) -> None:
 def test_read_fragment_missing_file_raises_file_not_found(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         read_fragment(tmp_path, "does_not_exist")
+
+
+def test_hf_cache_dir_is_a_named_subdirectory_of_the_cache_dir(tmp_path) -> None:
+    assert hf_cache_dir(tmp_path) == tmp_path / "hf"

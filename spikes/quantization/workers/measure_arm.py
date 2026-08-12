@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm", required=True, choices=["fp32", "int8"])
     parser.add_argument("--model-path", required=True)
+    parser.add_argument("--hf-cache-dir", required=True)
     parser.add_argument(
         "--batch-sizes", required=True, help="comma-separated, e.g. 1,8,32"
     )
@@ -54,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     checkpoints["after_session"] = time.perf_counter()
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=args.hf_cache_dir)
     checkpoints["after_tokenizer"] = time.perf_counter()
 
     probe_text = "Sunrise Agro Traders"  # one invented smoke-set name (spikes/quantization/smoke.py)
