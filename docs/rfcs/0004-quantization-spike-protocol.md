@@ -90,4 +90,16 @@ constraints on a client device.
 2. Does ONNX Runtime's default `quantize_dynamic` operator selection differ between
    platforms? If so the operator diff must be recorded per platform, not once.
 3. Should the smoke set be drawn from the development split, or fixed independently?
-   Development split, to avoid touching calibration or sealed data (ADR-0011).
+   **Settled: fixed independently, authored for this spike.** The proposed answer above
+   assumed the corpus generator and its three-way split already existed. They do not when
+   this spike runs — the split is later work, and the spike deliberately precedes the
+   harness it constrains (see Motivation). There is therefore nothing to draw a
+   development split from.
+
+   ADR-0011's constraint is satisfied rather than waived: the concern is that calibration
+   or sealed data must not be touched, and a set authored before either exists cannot
+   touch them. When the split does exist, any later evaluation drawing name pairs from the
+   corpus is bound by ADR-0011 as written; this exemption covers the spike's own smoke set
+   and nothing else.
+
+   The pairs are invented and synthetic, per ADR-0004.
