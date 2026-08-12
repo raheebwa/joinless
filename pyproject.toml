@@ -33,6 +33,23 @@ export = [
 
 # onnxruntime ships no py.typed marker, so mypy cannot see through it regardless of
 # which module imports it (ADR-0002).
+
 [[tool.mypy.overrides]]
-module = ["onnxruntime.*"]
+# These ship no type stubs. Several live in the `export` group, and the type-check
+# job installs `dev,neural` rather than every group, so they are absent when it runs.
+# Their absence is a property of the profile under test, not a defect in this code.
+module = [
+    "huggingface_hub",
+    "huggingface_hub.*",
+    "onnx",
+    "onnx.*",
+    "onnxruntime",
+    "onnxruntime.*",
+    "optimum",
+    "optimum.*",
+    "torch",
+    "torch.*",
+    "transformers",
+    "transformers.*",
+]
 ignore_missing_imports = true
