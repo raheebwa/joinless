@@ -20,3 +20,5 @@ warns nobody.
 - The importable `joinless` package.
 - `export` optional install profile (torch, transformers, `optimum[onnxruntime]`,
   onnx, huggingface_hub) for the scripted model-export tooling under `spikes/`.
+- `rapidfuzz` as a runtime dependency, carrying the character-aware classical arm.
+- Full line and branch coverage as an enforced floor rather than a reported number.
