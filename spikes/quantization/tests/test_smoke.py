@@ -89,3 +89,34 @@ def test_build_divergence_report_matches_manual_computation() -> None:
 
     assert max_divergence == pytest.approx(1 - 0.87)
     assert math.isclose(max_divergence, 0.13, rel_tol=1e-9)
+
+
+class _NoTruthiness(list):  # type: ignore[type-arg]
+    """Stands in for a numpy array: sized and indexable, but raises on bool()."""
+
+    def __bool__(self) -> bool:
+        raise ValueError(
+            "The truth value of an array with more than one element is ambiguous"
+        )
+
+
+def test_mean_pool_never_takes_the_truth_value_of_the_container() -> None:
+    """The session returns a numpy array, whose truth value is ambiguous and raises.
+    Emptiness must be decided by length, not by truthiness, or step 6 dies on the
+    first real embedding while every list-based test passes."""
+    embeddings = _NoTruthiness([[1.0, 3.0], [5.0, 7.0]])
+
+    pooled = mean_pool(embeddings, [1, 1])
+
+    assert pooled == [3.0, 5.0]
+
+
+def test_cosine_similarity_returns_a_builtin_float() -> None:
+    """At run time the inputs are numpy arrays, whose arithmetic yields numpy scalars.
+    A numpy float32 satisfies the `float` annotation structurally but is not JSON
+    serializable, so a record carrying one cannot be written at all. The declared
+    return type has to be produced, not merely annotated."""
+    result = cosine_similarity([1.0, 0.0], [1.0, 0.0])
+
+    assert type(result) is float
+    assert result == 1.0
