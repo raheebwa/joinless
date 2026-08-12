@@ -21,3 +21,4 @@ explicitly. Superseded records are kept, not deleted — the reasoning is the po
 | [0012](0012-bring-your-own-labelled-pairs.md) | Bring-your-own labelled pairs is the only scope addition | Accepted |
 | [0013](0013-fail-closed-failure-semantics.md) | Fail closed: a failure is recorded as a failure, never degraded into a number | Accepted |
 | [0014](0014-optional-neural-install-profile.md) | The neural runtime is an optional install profile, not a base dependency | Accepted |
+| [0015](0015-local-enforcement-of-contribution-rules.md) | Contribution rules are enforced at the commit, not only in review | Accepted |
