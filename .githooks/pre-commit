@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Keeps commits off the default branch and on a conventionally named branch.
+# Installed by: git config core.hooksPath .githooks
+set -uo pipefail
+
+branch="$(git symbolic-ref --short -q HEAD || true)"
+
+if [ "$branch" = "main" ]; then
+  printf 'pre-commit: main takes changes through a pull request.\n  Start a branch: git switch -c <type>/<short-description>\n' >&2
+  exit 1
+fi
+
+types='feat|fix|docs|style|refactor|perf|test|chore'
+if [ -n "$branch" ] && ! printf '%s' "$branch" | grep -qE "^($types)/[a-z0-9._-]+$"; then
+  printf 'pre-commit: branch "%s" is not <type>/<short-description>.\n  Types: %s\n' "$branch" "${types//|/ }" >&2
+  exit 1
+fi
+
+# Optional local extension, kept inside the git directory so it is never
+# published. Absent by default; when present it runs as an additional gate.
+ext="$(git rev-parse --git-common-dir)/hooks/pre-commit.local"
+[ -x "$ext" ] && exec "$ext"
+exit 0
