@@ -129,11 +129,13 @@ anything but the scorer that produced it.
 |---|---|---|
 | `OverlapScorer` | `frozenset[str]` of normalised tokens | overlap coefficient `|A ∩ B| / min(|A|,|B|)` |
 | `FuzzyScorer` | normalised string | character-aware ratio via `rapidfuzz` (ADR-0008) |
-| `EmbeddingScorer` | `np.ndarray` — L2-normalised mean-pooled embedding | cosine similarity, rescaled from `[-1, 1]` to `[0, 1]` |
+| `EmbeddingScorer` | `tuple[float, ...] \| None` — L2-normalised mean-pooled embedding, `None` for a blank name | cosine similarity, rescaled from `[-1, 1]` to `[0, 1]` |
 
-`EmbeddingScorer` is constructed with a model path and a runtime session — and no
-threshold, which now sits in the adapter. The fp32 and int8 arms are the same class with
-different model artefacts. That keeps the
+`EmbeddingScorer` is constructed with a name, an already-built tokenizer and an
+already-opened runtime session — and no threshold, which sits in the adapter. Resolving a
+model path, loading the tokenizer and opening the session is the caller's job (one factory
+function per arm); the class itself holds only what it needs to prepare and score. The
+fp32 and int8 arms are the same class with different model artefacts. That keeps the
 comparison honest — the only difference between those two arms is the weights.
 
 ## Open questions
