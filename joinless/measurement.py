@@ -560,12 +560,13 @@ class PeakMemory:
 
     The sample is taken once, after ``scorer.prepare`` and ``scorer.score``
     have both run, immediately before the worker exits — so it covers
-    everything the worker did, by construction, for whichever arm runs.
-    Today that is verified only for the classical arms, and neither one
-    loads a model (ADR-0014; the embedding arms that would are milestone
-    M3), so "including model load" is not yet exercised by any test — it
-    follows from the sampling point coming after everything the arm's
-    worker does, not from having measured a model-loading arm.
+    everything the worker did, by construction, for whichever arm runs,
+    model load included for the two embedding arms that now exist
+    (:mod:`joinless.embedding`). Exercising that claim in a test needs a
+    real model artefact on disk, which this suite does not carry (issue
+    #59), so "including model load" holds by construction — the sampling
+    point comes after everything the arm's worker does — rather than from a
+    test that has measured a model-loading arm's peak RSS.
 
     ``thread_count`` and ``power_mode`` travel with the figure because both
     move it (issue #55's third bullet): ``power_mode`` is supplied by the
@@ -573,6 +574,20 @@ class PeakMemory:
     platform-specific concern no issue in this batch asks this module to
     build, so the field exists to carry a value the caller already has,
     not to derive one.
+
+    ``thread_count`` is ``threading.active_count()`` (:data:`_PEAK_MEMORY_SCRIPT`)
+    — a count of Python-level ``threading.Thread`` objects alive in the
+    worker at sampling time, and nothing else. It cannot see a native thread
+    pool a C extension creates on its own, such as ONNX Runtime's intra-op
+    pool for a neural arm's session: that pool's threads are never
+    ``threading.Thread`` instances, so this field reads the same for a
+    classical arm and a neural arm regardless of how many native threads the
+    latter's runtime actually used (issue #109). What this project
+    configured for that pool (nothing) and what ONNX Runtime therefore used
+    (its own automatic default, unpinned) are two further, distinct facts —
+    recorded on :class:`~joinless.runrecord.Environment`, not here, since
+    they describe the runtime's own thread pool rather than a count this
+    field could ever have reported.
     """
 
     arm: str
@@ -610,6 +625,19 @@ def measure_peak_memory(
 # parent package is already imported. The script below imports it itself,
 # after starting its own clock, and is the only worker in this module that
 # has to.
+#
+# scoring.get_scorer(...) is timed too (issue #108): previously it sat between
+# two clock reads and its cost was measured by nobody. For a neural arm, that
+# one call is where ONNX Runtime and the tokenizer package are imported
+# (EmbeddingScorer's own construction path, joinless.embedding._build_scorer)
+# and where the session and tokenizer are actually built from the artefact —
+# exactly the costs RFC-0002's Metrics table calls "import" (the arm's own
+# imports), "session creation" and "tokenizer load". A classical arm's scorer
+# carries neither of the latter two (getattr(..., None)), so the whole
+# construction duration is folded into import — which is correct for
+# `overlap` and `fuzzy` too: whatever a classical arm's own constructor
+# imports (rapidfuzz, for `fuzzy`) belongs under "the arm's own imports", not
+# under a phase named for a session or tokenizer neither one has.
 _COLD_START_SCRIPT = """
 import json
 import os
@@ -623,11 +651,23 @@ _before_import = time.perf_counter()
 import joinless.scoring as scoring
 _after_import = time.perf_counter()
 
+_before_construct = time.perf_counter()
 try:
     scorer = scoring.get_scorer(params["arm"])
 except (ValueError, scoring.ScorerUnavailable) as exc:
     print(json.dumps({"status": "unavailable", "reason": str(exc)}))
     sys.exit(0)
+_after_construct = time.perf_counter()
+
+_tokenizer_load_seconds = getattr(scorer, "tokenizer_load_seconds", None)
+_session_creation_seconds = getattr(scorer, "session_creation_seconds", None)
+_construction_seconds = _after_construct - _before_construct
+if _tokenizer_load_seconds is None or _session_creation_seconds is None:
+    _import_remainder_seconds = _construction_seconds
+else:
+    _import_remainder_seconds = (
+        _construction_seconds - _tokenizer_load_seconds - _session_creation_seconds
+    )
 
 _before_first = time.perf_counter()
 left = scorer.prepare(params["left_name"])
@@ -638,7 +678,9 @@ _after_first = time.perf_counter()
 print(json.dumps({
     "status": "ok",
     "child_start_epoch": _child_start,
-    "import_seconds": _after_import - _before_import,
+    "import_seconds": (_after_import - _before_import) + _import_remainder_seconds,
+    "session_creation_seconds": _session_creation_seconds,
+    "tokenizer_load_seconds": _tokenizer_load_seconds,
     "first_inference_seconds": _after_first - _before_first,
 }))
 """
@@ -652,6 +694,23 @@ print(json.dumps({
 # what a record needs.
 _NO_SESSION_REASON = "classical arms construct no session"
 _NO_TOKENIZER_REASON = "classical arms load no tokenizer"
+
+
+def _phase_or_reason(seconds: float | None, reason: str) -> Metric:
+    """A cold-start sub-phase that only some arms have: defined when the
+    worker reported a real duration, undefined with ``reason`` when it did
+    not — the same branch :func:`measure_artifact_size` already makes on
+    whether ``paths`` came back empty (issue #63), generalised here from "no
+    artefact paths" to "no duration reported" (issue #108). The worker is
+    the one place that knows which arm actually constructed a session or a
+    tokenizer (:data:`_COLD_START_SCRIPT`'s ``getattr(scorer, ..., None)``),
+    so this function branches on what it reported rather than re-deriving
+    "is this arm neural" from the arm's name a second time.
+    """
+    if seconds is None:
+        return Metric(value=None, undefined_reason=reason)
+    return Metric(value=seconds, undefined_reason=None)
+
 
 # RFC-0002 Method step 7 / Metrics table: interpreter start is identical
 # across every arm and is not attributable to any of them. Every other phase
@@ -683,11 +742,12 @@ class ColdStartPhases:
     :attr:`total`, never itself measured.
 
     ``session_creation`` and ``tokenizer_load`` are :class:`Metric` values
-    that are ``None`` for every arm this module can measure today: only the
-    classical arms initialise (ADR-0014), and RFC-0002's Metrics table says
-    those two phases are ``null`` for them, not zero, because a classical
-    arm constructs no session and loads no tokenizer at all — the phase does
-    not apply, rather than applying and costing nothing.
+    that carry a real duration for the two embedding arms, which construct a
+    session and load a tokenizer from the artefact respectively (issue #108)
+    — and are ``None`` for ``overlap`` and ``fuzzy``, which construct
+    neither at all: RFC-0002's Metrics table says these two phases are
+    ``null`` for the classical arms, not zero, because the phase does not
+    apply to them, rather than applying and costing nothing.
     """
 
     arm: str
@@ -749,8 +809,14 @@ def measure_cold_start(
         import_phase=Metric(
             value=cast(float, result["import_seconds"]), undefined_reason=None
         ),
-        session_creation=Metric(value=None, undefined_reason=_NO_SESSION_REASON),
-        tokenizer_load=Metric(value=None, undefined_reason=_NO_TOKENIZER_REASON),
+        session_creation=_phase_or_reason(
+            cast("float | None", result.get("session_creation_seconds")),
+            _NO_SESSION_REASON,
+        ),
+        tokenizer_load=_phase_or_reason(
+            cast("float | None", result.get("tokenizer_load_seconds")),
+            _NO_TOKENIZER_REASON,
+        ),
         first_inference=Metric(
             value=cast(float, result["first_inference_seconds"]), undefined_reason=None
         ),

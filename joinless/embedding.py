@@ -93,6 +93,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -593,19 +594,36 @@ def _build_scorer(
 
     ``onnxruntime`` and ``tokenizers`` are imported here, not at module level (ADR-0014,
     ADR-0017) — see the module docstring for why that boundary matters.
+
+    Tokenizer construction and session construction are timed separately, right
+    around each call, and the two durations travel on the returned
+    :class:`EmbeddingScorer` (issue #108) — RFC-0002's Metrics table names them as
+    two distinct phases ("tokenizer construction from the artefact" and "inference
+    session construction from the artefact"), so they are captured as two distinct
+    intervals here rather than one combined duration a caller would have to guess
+    how to split.
     """
     import onnxruntime
     from tokenizers import Tokenizer
 
+    _before_tokenizer = time.perf_counter()
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     tokenizer.enable_padding(pad_token=_PAD_TOKEN, pad_id=_PAD_ID)
     tokenizer.enable_truncation(max_length=_MAX_SEQUENCE_LENGTH)
+    _after_tokenizer = time.perf_counter()
 
     session = onnxruntime.InferenceSession(
         str(model_path), providers=["CPUExecutionProvider"]
     )
+    _after_session = time.perf_counter()
 
-    return EmbeddingScorer(name=name, session=session, tokenizer=tokenizer)
+    return EmbeddingScorer(
+        name=name,
+        session=session,
+        tokenizer=tokenizer,
+        tokenizer_load_seconds=_after_tokenizer - _before_tokenizer,
+        session_creation_seconds=_after_session - _after_tokenizer,
+    )
 
 
 def load_fp32_scorer(environ: Mapping[str, str] | None = None) -> EmbeddingScorer:
@@ -769,18 +787,47 @@ class EmbeddingScorer:
     ``[-1, 1]`` to ``[0, 1]`` (RFC-0001's "Comparability"), clamped to that range to
     absorb the floating-point rounding a rescaled dot product can occasionally overshoot
     it by.
+
+    ``tokenizer_load_seconds`` and ``session_creation_seconds`` carry how long
+    :func:`_build_scorer` spent on each of its two construction steps (issue #108,
+    RFC-0002's cold-start decomposition) — ``None`` for an instance built any other
+    way, such as every other test in this module, which construct this class
+    directly from an already-built double and never claim a duration they did not
+    measure.
     """
 
     def __init__(
-        self, *, name: str, session: _SessionLike, tokenizer: _TokenizerLike
+        self,
+        *,
+        name: str,
+        session: _SessionLike,
+        tokenizer: _TokenizerLike,
+        tokenizer_load_seconds: float | None = None,
+        session_creation_seconds: float | None = None,
     ) -> None:
         self._name = name
         self._session = session
         self._tokenizer = tokenizer
+        self._tokenizer_load_seconds = tokenizer_load_seconds
+        self._session_creation_seconds = session_creation_seconds
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def tokenizer_load_seconds(self) -> float | None:
+        """How long :func:`_build_scorer` spent constructing this instance's
+        tokenizer — see the class docstring for why this is ``None`` outside
+        that one construction path."""
+        return self._tokenizer_load_seconds
+
+    @property
+    def session_creation_seconds(self) -> float | None:
+        """How long :func:`_build_scorer` spent constructing this instance's
+        inference session — see the class docstring for why this is ``None``
+        outside that one construction path."""
+        return self._session_creation_seconds
 
     def prepare_all(
         self, names: Sequence[str | None]

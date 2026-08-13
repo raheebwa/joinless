@@ -782,6 +782,82 @@ def test_load_fp32_scorer_wires_a_real_tokenizer_and_session_from_the_resolved_p
     assert all(value is not None for value in prepared)
 
 
+def test_load_fp32_scorer_records_real_tokenizer_load_and_session_creation_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold start's session-creation and tokenizer-load phases (issue #108) come
+    from timing ``_build_scorer``'s own two construction steps, not from splitting
+    one combined duration after the fact — proven here by giving the fake tokenizer
+    and fake session each a different, known delay, so the two recorded durations
+    cannot be the same number read twice.
+    """
+    import time as time_module
+
+    class _SlowFakeTokenizer:
+        def __init__(self) -> None:
+            self.padding: dict[str, object] | None = None
+            self.truncation: dict[str, object] | None = None
+
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            self.padding = {"pad_token": pad_token, "pad_id": pad_id}
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            self.truncation = {"max_length": max_length}
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _SlowFakeTokenizer:
+            del path
+            time_module.sleep(0.02)
+            return _SlowFakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _SlowFakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+            time_module.sleep(0.05)
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _SlowFakeSession  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+    fp32_dir = tmp_path / "fp32"
+    model_digest = _write_fixture(fp32_dir / "model.onnx", b"a fake fp32 graph")
+    tokenizer_digest = _write_fixture(
+        fp32_dir / "tokenizer.json", b"a fake tokenizer config"
+    )
+    monkeypatch.setattr(embedding, "FP32_MODEL_SHA256", model_digest)
+    monkeypatch.setattr(embedding, "FP32_TOKENIZER_SHA256", tokenizer_digest)
+
+    scorer = embedding.load_fp32_scorer({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert scorer.tokenizer_load_seconds is not None
+    assert scorer.session_creation_seconds is not None
+    assert scorer.tokenizer_load_seconds >= 0.02
+    assert scorer.session_creation_seconds >= 0.05
+    assert scorer.session_creation_seconds > scorer.tokenizer_load_seconds
+
+
+def test_embedding_scorer_construction_timing_defaults_to_none_when_not_supplied() -> (
+    None
+):
+    """A caller that builds an ``EmbeddingScorer`` directly — every other test in
+    this file — never claims a construction duration it did not measure (issue
+    #108): only :func:`_build_scorer` supplies these two values."""
+    scorer = EmbeddingScorer(
+        name="embed-fp32",
+        session=_StubSession(lambda ids, mask: [[1.0, 0.0] for _ in ids]),
+        tokenizer=_StubTokenizer(lambda text: ([0], [1], [0])),
+    )
+
+    assert scorer.tokenizer_load_seconds is None
+    assert scorer.session_creation_seconds is None
+
+
 _NO_NETWORK_PROBE = """
 import sys
 import types
