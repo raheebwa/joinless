@@ -26,9 +26,29 @@ CSV or JSONL:
 | `label` | yes | `0` \| `1` | `1` same entity, `0` different entity |
 | `category` | no | string | user-defined perturbation family, for per-family reporting |
 | `pair_id` | no | string | user-owned identifier, so reports need not echo raw names |
+| `split` | no | `dev` \| `calibration` \| `test` | which split the pair is assigned to |
 
 Three required fields, deliberately. The schema is a compatibility surface once published,
 so it should be cheap to honour and hard to get wrong.
+
+`split`'s domain is the file's vocabulary, and it is deliberately shorter than the internal
+one. ADR-0011 names the three roles `development`, `calibration` and `sealed test`, because
+a role's name should say what it is for wherever it appears in this codebase. A column value
+someone types by hand should be short and unambiguous, which is a different requirement, so
+the two differ in two of the three values and the mapping is fixed here rather than left for
+a loader to guess:
+
+| Column value | Role (ADR-0011) |
+|---|---|
+| `dev` | `development` |
+| `calibration` | `calibration` |
+| `test` | `sealed test` |
+
+The mapping is total in both directions. It has to be, or the constraint below is false:
+the generator emits rows in this schema, so the corpus's own output must round-trip through
+the column vocabulary and back without landing on a value neither side accepts. A loader
+reading a value outside the column domain rejects the row under the same rule that rejects a
+label outside `{0, 1}`.
 
 ## Command
 
@@ -38,9 +58,11 @@ joinless benchmark --pairs my-pairs.csv --output run.json
 
 Behaviour:
 
-1. validate schema, types and label domain; fail with a message naming the row and column
-2. split deterministically into calibration and sealed test (ADR-0011) unless the file
-   supplies its own split column
+1. validate schema, types, label domain and — where the `split` column is present — its
+   domain; a file assigning one pair to two splits is rejected at load, with a message
+   naming the offending row
+2. assign each pair to a split: honour the `split` column where the file supplies one;
+   absent the column, splits are derived deterministically from the file (ADR-0011)
 3. run every arm over identical pairs
 4. select each arm's threshold on calibration data alone, then freeze
 5. report precision, recall and F1 on the sealed split, per `category` where supplied
@@ -50,12 +72,15 @@ Behaviour:
 ## Privacy
 
 User data is read and never leaves the machine: not uploaded, not copied into the
-repository, not written into the durable record. Reports identify pairs by `pair_id`, or by
-index where none is supplied.
+repository, not written into the durable record in identifying form. A durable record
+carries `pair_id` or an index, a hash of the name pair, and aggregate counts; it never
+carries `left_name` or `right_name`. Reports identify pairs the same way — by `pair_id`, or
+by index where none is supplied.
 
 Raw names appear in output only under an explicit `--include-names` flag intended for local
-error analysis. The default is chosen so that a record can be shared without re-reading it
-first.
+error analysis. The default excludes them because a user-supplied name may be personal
+data and a run record is written to be shared — the default has to hold without anyone
+re-reading the record first.
 
 ## The constraint that matters
 
@@ -70,9 +95,15 @@ invalidate the claim that a user's run is comparable to the published one.
 
 ## Open questions
 
-1. Should user-supplied splits be honoured in v1, or only deterministic generated ones?
+1. ~~Should user-supplied splits be honoured in v1, or only deterministic generated ones?
    Prefer generated-only unless honouring a supplied split is trivial — a user-chosen split
-   is one more way for calibration and test to overlap without anyone noticing.
+   is one more way for calibration and test to overlap without anyone noticing.~~
+   **Settled: honour a supplied split.** Honouring it is what makes the procedure runnable
+   on someone else's data under their own held-out set (PRD G7) — the reason the
+   labelled-pairs path exists at all (ADR-0012). The risk a user-chosen split introduces —
+   one pair assigned to two splits, leaking calibration material into the sealed test — is
+   closed by a load-time disjointness check that rejects the file outright rather than
+   warning.
 2. What is the minimum viable pair count before a reported F1 is meaningful? The command
    should warn below a stated floor rather than print a confident number from twenty rows.
 3. Should class imbalance be reported and warned on? A file that is 95% negatives produces

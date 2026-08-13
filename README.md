@@ -4,7 +4,7 @@
 [![Coverage 100%](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/raheebwa/joinless/actions/workflows/ci.yml)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Project Status: Concept – Minimal or no implementation has been done yet, or the repository is only intended to be a limited example, demo, or proof-of-concept.](https://www.repostatus.org/badges/latest/concept.svg)](https://www.repostatus.org/#concept)
+[![Project Status: WIP – Initial development is in progress, but there has not yet been a stable, usable release suitable for the public.](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
 
 The coverage badge states an **enforced floor**, not a measured number reported by a
 service. `pytest` is configured with `fail_under = 100` over line *and* branch coverage, so
@@ -105,9 +105,13 @@ afford the model and never think about it. On a client device the trade is real.
 
 ## Status
 
-Early. The benchmark harness and the classical baseline come first; the embedding arms
-follow. Results land in [`benchmarks/`](benchmarks/) as they are produced, with
-the exact hardware and runtime versions recorded alongside every run.
+The classical baseline is built: the `overlap` and `fuzzy` arms run end to end behind
+the `resolve`, `compare` and `doctor` commands, at an enforced 100% line and branch
+coverage floor. The evaluation harness that will score precision, recall and F1 per arm
+is still being built, so no accuracy figures exist yet — and the `embed-fp32` and
+`embed-int8` arms are not implemented. Results land in [`benchmarks/`](benchmarks/) as
+they are produced, with the exact hardware and runtime versions recorded alongside every
+run.
 
 ## Target platform
 
