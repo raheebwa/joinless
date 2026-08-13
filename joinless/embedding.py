@@ -285,17 +285,14 @@ class _Encoding(Protocol):
     @property
     def ids(self) -> list[int]:
         """Token ids, including any special tokens the tokenizer added."""
-        ...
 
     @property
     def attention_mask(self) -> list[int]:
         """``1`` for a real token, ``0`` for padding."""
-        ...
 
     @property
     def type_ids(self) -> list[int]:
         """Segment ids the graph's ``token_type_ids`` input expects."""
-        ...
 
 
 class _TokenizerLike(Protocol):
@@ -306,7 +303,6 @@ class _TokenizerLike(Protocol):
 
     def encode_batch(self, texts: Sequence[str]) -> Sequence[_Encoding]:
         """One encoding per text, in the same order."""
-        ...
 
 
 class _SessionLike(Protocol):
@@ -318,7 +314,6 @@ class _SessionLike(Protocol):
         self, output_names: list[str] | None, input_feed: Mapping[str, object]
     ) -> Sequence[Any]:
         """``None`` for ``output_names`` means every output the graph declares."""
-        ...
 
 
 def _clean(name: str | None) -> str | None:
