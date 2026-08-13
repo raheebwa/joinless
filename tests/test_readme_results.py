@@ -150,7 +150,7 @@ def _record(
     results: dict[str, dict[str, Any]],
     *,
     record_id: str = "20260813T153000Z-benchmark.json",
-    schema: str = "benchmark-v6",
+    schema: str = "benchmark-v7",
     seeds: list[int] | None = None,
     case_mixture: dict[str, int] | None = None,
     hardware: dict[str, Any] | None = None,

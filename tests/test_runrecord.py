@@ -48,7 +48,14 @@ def _environment() -> Environment:
             rapidfuzz="3.10.0",
         ),
         power_mode="ac",
-        thread_count=1,
+        onnx_threads_configured=Maybe(
+            value=None,
+            reason=(
+                "no arm in this project passes SessionOptions, "
+                "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+            ),
+        ),
+        onnx_threads_observed=Maybe(value=None, reason="no neural arm in this run"),
         warmup_count=5,
         repetition_count=20,
         models={},
@@ -466,7 +473,14 @@ def test_record_to_dict_renders_one_model_identity_by_arm_name_when_one_neural_a
         hardware=_environment().hardware,
         runtime_versions=_environment().runtime_versions,
         power_mode="ac",
-        thread_count=1,
+        onnx_threads_configured=Maybe(
+            value=None,
+            reason=(
+                "no arm in this project passes SessionOptions, "
+                "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+            ),
+        ),
+        onnx_threads_observed=Maybe(value=None, reason="no neural arm in this run"),
         warmup_count=5,
         repetition_count=20,
         models={"embed-fp32": fp32_identity},
@@ -528,7 +542,14 @@ def test_record_to_dict_renders_both_neural_arms_model_identities_when_both_ran(
         hardware=_environment().hardware,
         runtime_versions=_environment().runtime_versions,
         power_mode="ac",
-        thread_count=1,
+        onnx_threads_configured=Maybe(
+            value=None,
+            reason=(
+                "no arm in this project passes SessionOptions, "
+                "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+            ),
+        ),
+        onnx_threads_observed=Maybe(value=None, reason="no neural arm in this run"),
         warmup_count=5,
         repetition_count=20,
         models={"embed-fp32": fp32_identity, "embed-int8": int8_identity},
@@ -580,7 +601,14 @@ def test_record_to_dict_renders_quantized_operators_as_a_mapping_of_matmul_conve
         hardware=_environment().hardware,
         runtime_versions=_environment().runtime_versions,
         power_mode="ac",
-        thread_count=1,
+        onnx_threads_configured=Maybe(
+            value=None,
+            reason=(
+                "no arm in this project passes SessionOptions, "
+                "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+            ),
+        ),
+        onnx_threads_observed=Maybe(value=None, reason="no neural arm in this run"),
         warmup_count=5,
         repetition_count=20,
         models={},

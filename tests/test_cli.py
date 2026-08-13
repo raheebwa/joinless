@@ -375,6 +375,55 @@ def test_resolve_writes_an_empty_file_for_two_empty_record_sets(tmp_path: Path) 
     assert output.read_text(encoding="utf-8") == ""
 
 
+def test_resolve_rejects_a_record_missing_the_name_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A record missing 'name' must be reported with the file and the physical
+    line it came from, not an uncaught KeyError traceback (issue #110). The
+    blank first line is deliberate: it proves the reported line number is the
+    file's own line count, not the post-blank-skipping ordinal."""
+    from joinless.cli import main
+
+    left = tmp_path / "left.jsonl"
+    right = tmp_path / "right.jsonl"
+    output = tmp_path / "merged.jsonl"
+    left.write_text('\n{"latitude": 0.31, "longitude": 32.58}\n', encoding="utf-8")
+    _write_jsonl(
+        right, [{"name": "Acme Trading Co", "latitude": 0.31, "longitude": 32.58}]
+    )
+
+    exit_code = main(
+        ["resolve", "--left", str(left), "--right", str(right), "--output", str(output)]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert f"{left}:2" in err
+    assert "name" in err
+    assert not output.exists()
+
+
+def test_resolve_reproduces_the_committed_example_output(tmp_path: Path) -> None:
+    """A committed expected-output file that nothing checks will drift
+    (issue #110): ``examples/left.jsonl`` and ``examples/right.jsonl``,
+    resolved under the default scorer, must reproduce
+    ``examples/merged.jsonl`` byte-for-byte."""
+    from joinless.cli import main
+
+    examples_dir = Path(__file__).resolve().parents[1] / "examples"
+    left = examples_dir / "left.jsonl"
+    right = examples_dir / "right.jsonl"
+    expected = examples_dir / "merged.jsonl"
+    output = tmp_path / "merged.jsonl"
+
+    exit_code = main(
+        ["resolve", "--left", str(left), "--right", str(right), "--output", str(output)]
+    )
+
+    assert exit_code == 0
+    assert output.read_text(encoding="utf-8") == expected.read_text(encoding="utf-8")
+
+
 def test_resolve_completes_with_no_network_interface_available(tmp_path: Path) -> None:
     left = tmp_path / "left.jsonl"
     right = tmp_path / "right.jsonl"
@@ -715,7 +764,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v6"
+    assert record["schema"] == "benchmark-v7"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -996,7 +1045,21 @@ def test_benchmark_records_the_environment_the_readme_requires(
         "value": None,
         "reason": "no int8 arm in this run",
     }
-    assert environment["thread_count"] == 1
+    # Issue #109: a classical-only run has no ONNX Runtime session to observe,
+    # and this project configures no thread pool for one regardless — the
+    # record states both facts explicitly rather than asserting a configured
+    # count nothing set.
+    assert environment["onnx_threads_configured"] == {
+        "value": None,
+        "reason": (
+            "no arm in this project passes SessionOptions, "
+            "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+        ),
+    }
+    assert environment["onnx_threads_observed"] == {
+        "value": None,
+        "reason": "no neural arm in this run",
+    }
     assert environment["warmup_count"] == 5
     assert environment["repetition_count"] == 20
     assert environment["power_mode"] in {"ac", "battery", "unknown"}
@@ -1118,6 +1181,22 @@ def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_ar
     }
     assert environment["runtime_versions"]["onnxruntime"] == {
         "value": "9.9.9-fake",
+        "reason": None,
+    }
+    # Issue #109: this run's embed-fp32 arm constructed a real ONNX Runtime
+    # session, so "observed" now has something to report - unlike the
+    # classical-only fixture, where it stays null with a reason. Still
+    # nothing configured: the fp32 session above is built with providers
+    # alone, no SessionOptions.
+    assert environment["onnx_threads_configured"] == {
+        "value": None,
+        "reason": (
+            "no arm in this project passes SessionOptions, "
+            "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+        ),
+    }
+    assert environment["onnx_threads_observed"] == {
+        "value": "automatic pool, unpinned",
         "reason": None,
     }
 
@@ -2298,12 +2377,12 @@ sys.exit(cli.main({argv!r}))
 
 def test_the_schema_tag_names_one_transition_from_the_last_published_version() -> None:
     """The persisted shape changed several times across this branch's work, but
-    only ``benchmark-v5`` was ever published. A tag that counted intermediate,
+    only ``benchmark-v6`` was ever published. A tag that counted intermediate,
     uncommitted steps would imply versions that never existed to read.
     """
     from joinless.cli import _SCHEMA
 
-    assert _SCHEMA == "benchmark-v6"
+    assert _SCHEMA == "benchmark-v7"
 
 
 # --- report (issue #46): renders a record, never re-measures -----------------
@@ -2491,7 +2570,14 @@ def _report_fixture_record() -> dict[str, Any]:
             onnxruntime=Maybe(value="1.28.0", reason=None), rapidfuzz="3.10.0"
         ),
         power_mode="ac",
-        thread_count=1,
+        onnx_threads_configured=Maybe(
+            value=None,
+            reason=(
+                "no arm in this project passes SessionOptions, "
+                "intra_op_num_threads, or inter_op_num_threads (ADR-0006)"
+            ),
+        ),
+        onnx_threads_observed=Maybe(value=None, reason="no neural arm in this run"),
         warmup_count=5,
         repetition_count=20,
         models={},
@@ -2508,7 +2594,7 @@ def _report_fixture_record() -> dict[str, Any]:
     )
 
     record = assembly.build(
-        schema="benchmark-v6",
+        schema="benchmark-v7",
         started_at=datetime(2026, 8, 13, 12, 0, 0, tzinfo=UTC),
         command=("joinless", "benchmark"),
         environment=environment,
@@ -2820,4 +2906,4 @@ def test_report_refuses_a_record_from_an_older_schema_without_a_traceback(
     assert exit_code == 1
     assert captured.out == ""
     assert "benchmark-v4" in captured.err
-    assert "benchmark-v6" in captured.err
+    assert "benchmark-v7" in captured.err

@@ -96,7 +96,7 @@ def _one_family_record(
         ]
         arms = {"overlap": {"accuracy": _ok_accuracy(per_family)}}
     return {
-        "schema": "benchmark-v6",
+        "schema": "benchmark-v7",
         "record_id": "20260813T000000Z-benchmark.json",
         "results": arms,
         "contradictions": contradictions or [],
@@ -375,7 +375,7 @@ def test_rendering_a_record_from_an_older_schema_names_both_schemas() -> None:
 
     message = str(excinfo.value)
     assert "benchmark-v4" in message
-    assert "benchmark-v6" in message
+    assert "benchmark-v7" in message
 
 
 def test_the_renderable_schema_is_the_one_the_benchmark_writes() -> None:

@@ -180,24 +180,45 @@ from joinless.scoring import (
 _DEFAULT_THRESHOLD = 0.8
 
 
+class MalformedRecordError(ValueError):
+    """A ``resolve`` input line is missing a required field (issue #110).
+    Carries a message already naming the file and its physical line number,
+    the same "point at exactly where" convention :func:`_cmd_report`'s own
+    "could not read"/"not a valid JSON run record" messages already use for
+    an unreadable file and malformed JSON — this is the sibling case for a
+    line that parses as JSON but is missing ``name``, the one field this
+    schema requires (the module docstring's "The record-set schema for
+    ``resolve``")."""
+
+
 def _read_records(path: Path, *, source: str) -> list[Record]:
     """Read one side of a ``resolve`` run: see the module docstring for the schema.
 
     Blank lines are skipped rather than counted, so a trailing newline at end of
     file — nearly universal in a hand- or editor-written JSON Lines file — cannot
-    shift every later record's ``ordinal`` by one.
+    shift every later record's ``ordinal`` by one. ``line_number`` counts every
+    physical line, blank or not, so it always matches what a reader's editor
+    shows them — unlike ``ordinal``, which is deliberately blank-line-blind.
     """
     records: list[Record] = []
     ordinal = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         if not line.strip():
             continue
         row: dict[str, Any] = json.loads(line)
+        try:
+            name = row["name"]
+        except KeyError as exc:
+            raise MalformedRecordError(
+                f"{path}:{line_number}: record has no 'name' field"
+            ) from exc
         records.append(
             Record(
                 source=source,
                 ordinal=ordinal,
-                name=row["name"],
+                name=name,
                 latitude=row.get("latitude"),
                 longitude=row.get("longitude"),
                 fields=row.get("fields", {}),
@@ -257,8 +278,12 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    left = _read_records(args.left, source=args.left.stem)
-    right = _read_records(args.right, source=args.right.stem)
+    try:
+        left = _read_records(args.left, source=args.left.stem)
+        right = _read_records(args.right, source=args.right.stem)
+    except MalformedRecordError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     matcher = ThresholdMatcher(scorer=scorer, threshold=_DEFAULT_THRESHOLD)
     result = resolve_records(left, right, matcher)
     _write_resolution(args.output, result)
@@ -609,6 +634,45 @@ def _quantized_operators(
 # does, and does not, cover.
 _MEASUREMENT_PREPARATION_PATH: PreparationPath = "hoisted"
 
+# issue #109: no arm this module can run ever passes `SessionOptions`,
+# `intra_op_num_threads` or `inter_op_num_threads` to
+# `onnxruntime.InferenceSession` (`embedding.py`'s own session construction
+# takes `providers` alone) - a fact about this project's code, true of every
+# run whether or not a neural arm happens to load, and therefore a constant
+# rather than a value derived per run the way `_onnx_threads_observed` below
+# is. Pinning the pool is a new experiment RFC-0002's protocol does not call
+# for; this constant records the absence of pinning, not a gap to fill in.
+_ONNX_THREADS_CONFIGURED = Maybe[int](
+    value=None,
+    reason=(
+        "no arm in this project passes SessionOptions, intra_op_num_threads, "
+        "or inter_op_num_threads (ADR-0006)"
+    ),
+)
+
+
+def _onnx_threads_observed(*, models: Mapping[str, ModelIdentity]) -> Maybe[str]:
+    """What ONNX Runtime's intra-op pool actually did this run - distinct
+    from :data:`_ONNX_THREADS_CONFIGURED` (what this project set, nothing)
+    and from :attr:`~joinless.measurement.PeakMemory.thread_count` (Python-
+    level ``threading.Thread`` objects, measured per arm, blind to any
+    native pool) - issue #109's three previously-conflated facts.
+
+    ``models`` non-empty is the same condition :func:`_runtime_versions`
+    already keys its own onnxruntime-version fact on: at least one neural
+    arm's own ``get_scorer`` call constructed a real
+    ``onnxruntime.InferenceSession`` this run. ONNX Runtime's intra-op
+    thread count defaults to ``0`` - its own sentinel for "choose
+    automatically" - whenever no ``SessionOptions`` sets it, which nothing
+    in this project ever does, so the only honest fact to record is that
+    the pool ran automatic and unpinned, never a specific count this
+    project does not query the runtime for. A run with no neural arm has no
+    session for ONNX Runtime to have sized a pool for (ADR-0013).
+    """
+    if models:
+        return Maybe(value="automatic pool, unpinned", reason=None)
+    return Maybe(value=None, reason="no neural arm in this run")
+
 
 def _environment(
     power_mode: str,
@@ -620,10 +684,8 @@ def _environment(
         hardware=_hardware(),
         runtime_versions=_runtime_versions(models=models),
         power_mode=power_mode,
-        # Single-threaded: no arm this module can run configures a thread pool or a
-        # GPU/NPU execution provider (ADR-0006), and neither classical scorer
-        # spawns a worker thread of its own.
-        thread_count=1,
+        onnx_threads_configured=_ONNX_THREADS_CONFIGURED,
+        onnx_threads_observed=_onnx_threads_observed(models=models),
         warmup_count=_WARMUP_COUNT,
         repetition_count=_REPETITION_COUNT,
         models=models,
