@@ -53,7 +53,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from joinless import resolver
 from joinless.evaluation import Metric
+from joinless.records import Record
+from joinless.scoring import Scorer
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,17 +284,74 @@ def measure_warm_latency(
     )
 
 
-# The one prepare call before either timed section runs past runtime start-up
-# cost (import, lazy graph load) — measured separately by measure_cold_start,
-# so folding it into hoisted or naive here would double-count it (RFC-0002
-# Method step 2). Both timed sections share this single warm-up rather than
-# each getting their own, so neither path is warmed up more than the other.
+def _preparation_costs(
+    scorer: Scorer[Any],
+    left_names: Sequence[str],
+    right_names: Sequence[str],
+    left_indices: Sequence[int],
+    right_indices: Sequence[int],
+) -> tuple[float, float]:
+    """Time both preparation paths for an already-constructed ``scorer``,
+    over :class:`~joinless.records.Record` objects rebuilt from
+    ``left_names``/``right_names`` and the ``(left_indices, right_indices)``
+    pairs they form — the same shape ``_PREPARATION_COST_SCRIPT`` decodes
+    from ``JOINLESS_MEASURE_PARAMS`` and passes straight through.
+
+    Both timed sections call :func:`joinless.resolver.prepare_hoisted` and
+    :func:`joinless.resolver.prepare_naive` — the exact functions
+    :func:`joinless.resolver.score_candidates` calls to do the real scoring
+    the library ships — rather than a second copy of either loop living in
+    this module (issue #100). ``joinless.resolver`` is imported as a module
+    (not ``from ... import prepare_hoisted``) so a test can monkeypatch
+    ``resolver.prepare_hoisted``/``resolver.prepare_naive`` and observe this
+    function actually call the patched version, proving delegation rather
+    than a coincidentally-matching copy.
+
+    Importable and callable directly, outside the isolated worker, which is
+    what makes that delegation testable in-process without paying for a
+    subprocess spawn; ``_PREPARATION_COST_SCRIPT`` calls this same function,
+    for real, inside a fresh interpreter, purely to get a realistic
+    wall-clock figure (RFC-0002 Method step 7).
+
+    The one ``prepare`` call before either timed section runs past runtime
+    start-up cost (import, lazy graph load) — measured separately by
+    :func:`measure_cold_start`, so folding it into hoisted or naive here
+    would double-count it (RFC-0002 Method step 2). Both timed sections
+    share this single warm-up rather than each getting their own, so
+    neither path is measured any warmer than the other.
+    """
+    left_records = [
+        Record(source="preparation-cost", ordinal=index, name=name)
+        for index, name in enumerate(left_names)
+    ]
+    right_records = [
+        Record(source="preparation-cost", ordinal=index, name=name)
+        for index, name in enumerate(right_names)
+    ]
+    pairs = [
+        (left_records[left_index], right_records[right_index])
+        for left_index, right_index in zip(left_indices, right_indices, strict=True)
+    ]
+
+    scorer.prepare(left_names[0])
+
+    start = time.perf_counter()
+    resolver.prepare_hoisted(scorer, left_records, right_records)
+    hoisted_seconds = time.perf_counter() - start
+
+    start = time.perf_counter()
+    resolver.prepare_naive(scorer, pairs)
+    naive_seconds = time.perf_counter() - start
+
+    return hoisted_seconds, naive_seconds
+
+
 _PREPARATION_COST_SCRIPT = """
 import json
 import os
-import time
 
 import joinless.scoring as scoring
+from joinless.measurement import _preparation_costs
 
 params = json.loads(os.environ["JOINLESS_MEASURE_PARAMS"])
 try:
@@ -299,24 +359,13 @@ try:
 except (ValueError, scoring.ScorerUnavailable) as exc:
     print(json.dumps({"status": "unavailable", "reason": str(exc)}))
 else:
-    left_names = params["left_names"]
-    right_names = params["right_names"]
-    left_indices = params["left_indices"]
-    right_indices = params["right_indices"]
-
-    scorer.prepare(left_names[0])
-
-    _start = time.perf_counter()
-    scorer.prepare_all(left_names)
-    scorer.prepare_all(right_names)
-    hoisted_seconds = time.perf_counter() - _start
-
-    _start = time.perf_counter()
-    for _left_index, _right_index in zip(left_indices, right_indices):
-        scorer.prepare(left_names[_left_index])
-        scorer.prepare(right_names[_right_index])
-    naive_seconds = time.perf_counter() - _start
-
+    hoisted_seconds, naive_seconds = _preparation_costs(
+        scorer,
+        params["left_names"],
+        params["right_names"],
+        params["left_indices"],
+        params["right_indices"],
+    )
     print(json.dumps({
         "status": "ok",
         "hoisted_seconds": hoisted_seconds,
