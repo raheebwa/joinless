@@ -38,6 +38,7 @@ from typing import Any, Generic, TypeVar, cast
 
 from joinless.corpus import Corpus
 from joinless.evaluation import (
+    AccuracyDivergence,
     Contradiction,
     EvaluationReport,
     ExpectedWinners,
@@ -115,6 +116,29 @@ class ModelIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class MatmulConversion:
+    """How many of one candidate-for-quantization operator type converted, and
+    how many remain fp32 (issue #68: "the list is what makes the int8 number
+    interpretable" — a bare list of the two replacement operator types present
+    cannot answer "36 matmuls converted or 3", only whether conversion
+    happened at all). Mirrors
+    ``benchmarks/20260812T181752Z-quantization-spike.json``'s own
+    ``operators.matmul_conversion`` shape, the precedent this run record's own
+    shape is read against (:mod:`joinless.embedding`'s
+    :func:`~joinless.embedding.matmul_conversion_census`).
+
+    ``fp32_count`` is redundant with ``converted_count + int8_count_remaining``
+    — kept anyway, mirroring the spike record's own three-field shape exactly,
+    so a reader comparing this run's numbers against that record's finds the
+    same three names rather than having to recompute one of them.
+    """
+
+    converted_count: int
+    fp32_count: int
+    int8_count_remaining: int
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeVersions:
     """ONNX Runtime and ``rapidfuzz`` versions (benchmarks/README.md).
     ``rapidfuzz`` is never absent — it is a base dependency of every install
@@ -137,6 +161,27 @@ class Environment:
     Every field here is supplied by the caller — this module reads no
     hardware, clock, or filesystem fact of its own (module docstring), so a
     test can build one from plain values without patching anything.
+
+    ``models`` carries one :class:`ModelIdentity` per neural arm that
+    actually initialised, keyed by arm name — a plain mapping rather than a
+    single :class:`Maybe`, because a run can load more than one neural arm's
+    model at once (``embed-fp32`` and ``embed-int8``, issue #67) and each
+    carries its own checksum: a singular slot would have to pick one and
+    silently drop the other, which is exactly the quiet degradation ADR-0013
+    exists to rule out. An empty mapping means no neural arm ran, unambiguously
+    — there is no zero/undefined confusion to guard against here the way
+    there is for a ratio (ADR-0013's motivating case), since "which arms
+    loaded a model" has only one honest empty state.
+
+    ``quantized_operators`` is the int8 arm's matmul-conversion census, keyed
+    by candidate operator type (``"MatMul"``, ``"Gemm"``) — issue #68's stated
+    purpose is answering "how many of the graph's matmuls were converted and
+    how many remain in fp32", which a flat list of the operator types present
+    cannot do: a smaller artefact and an unchanged latency are either the
+    expected consequence of a partly-quantized encoder or a puzzling result,
+    and only the counts tell a reader which. Wrapped in :class:`Maybe`, not a
+    bare mapping — a run with no int8 arm has no graph to read a census from
+    (ADR-0013).
     """
 
     hardware: Hardware
@@ -145,8 +190,8 @@ class Environment:
     thread_count: int
     warmup_count: int
     repetition_count: int
-    model: Maybe[ModelIdentity]
-    quantized_operators: Maybe[tuple[str, ...]]
+    models: Mapping[str, ModelIdentity]
+    quantized_operators: Maybe[Mapping[str, MatmulConversion]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +258,22 @@ class RunRecord:
     outcome — never "the comparison never happened": the field is a required
     argument to :meth:`RunAssembly.build`, so no ``RunRecord`` can exist
     without it having been supplied.
+
+    ``int8_accuracy_divergence`` is the int8 arm's per-family F1 divergence
+    from the fp32 arm, in the same run (issue #67's third bullet) — the
+    output of :func:`joinless.evaluation.compute_accuracy_divergence`,
+    computed once by the caller from the two arms' own
+    :class:`~joinless.evaluation.EvaluationReport` and handed to
+    :meth:`RunAssembly.build`, mirroring exactly how ``contradictions`` is
+    computed once and persisted rather than recomputed. Wrapped in
+    :class:`Maybe`, not a bare tuple: a run where either arm did not produce
+    a comparable accuracy report — the int8 artefact absent, the fp32 arm
+    unavailable — has nothing to compute a divergence from, and that is
+    reported as an explicit absence with a reason (ADR-0013), never as an
+    empty tuple that would look like "computed, and there was nothing to
+    report" rather than "not computed at all". Also a required argument to
+    :meth:`RunAssembly.build`, for the same reason ``contradictions`` is: a
+    caller cannot build a record without stating what it found.
     """
 
     schema: str
@@ -225,6 +286,7 @@ class RunRecord:
     expected_winners: ExpectedWinners
     results: Mapping[str, ArmResult]
     contradictions: tuple[Contradiction, ...]
+    int8_accuracy_divergence: Maybe[tuple[AccuracyDivergence, ...]]
 
 
 def build_evaluation_set_identity(
@@ -314,6 +376,7 @@ class RunAssembly:
         evaluation_set: EvaluationSetIdentity,
         selected_thresholds: Sequence[SelectedThreshold],
         contradictions: Sequence[Contradiction],
+        int8_accuracy_divergence: Maybe[tuple[AccuracyDivergence, ...]],
     ) -> RunRecord:
         """Freeze everything added so far into a :class:`RunRecord`.
 
@@ -322,11 +385,13 @@ class RunAssembly:
         rather than the caller error it is — the same reasoning
         :func:`joinless.evaluation.evaluate` applies to an empty pair list.
 
-        ``contradictions`` has no default: a caller cannot build a record
-        without stating what :func:`joinless.evaluation.find_contradictions`
-        found, which is what makes "the comparison ran, whatever it found"
-        a fact about every ``RunRecord`` rather than a step a caller could
-        forget (see :class:`RunRecord`'s own docstring).
+        ``contradictions`` and ``int8_accuracy_divergence`` have no default:
+        a caller cannot build a record without stating what
+        :func:`joinless.evaluation.find_contradictions` and
+        :func:`joinless.evaluation.compute_accuracy_divergence` found, which
+        is what makes "the comparison ran, whatever it found" a fact about
+        every ``RunRecord`` rather than a step a caller could forget (see
+        :class:`RunRecord`'s own docstring).
         """
         if not self._results:
             raise ValueError("run record requires at least one arm's result")
@@ -341,6 +406,7 @@ class RunAssembly:
             expected_winners=self._expected_winners,
             results=MappingProxyType(dict(self._results)),
             contradictions=tuple(contradictions),
+            int8_accuracy_divergence=int8_accuracy_divergence,
         )
 
 

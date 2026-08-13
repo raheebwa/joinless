@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-"""The fp32 embedding arm: pooling, similarity, batching and fail-closed behaviour.
+"""The embedding arms (fp32 and int8): pooling, similarity, batching and fail-closed
+behaviour.
 
 Every test here runs against a tokenizer/session double, never the real 90 MB artefact
 (see ``joinless/embedding.py``'s module docstring for why that needs no NumPy and no real
@@ -245,6 +246,434 @@ def test_probe_fp32_returns_none_when_every_check_passes(
     reason = embedding.probe_fp32({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
 
     assert reason is None
+
+
+# --- the int8 arm: same shape as fp32, a different artefact (RFC-0001, issue #67) ---
+
+
+def test_int8_model_checksum_is_pinned_to_the_recorded_artifact() -> None:
+    """The checksum of the int8 graph this arm was built and verified against
+    (environment fact recorded for issue #67) - pinned as a literal, mirroring
+    :data:`embedding.FP32_MODEL_SHA256`, so a change to it is a visible diff
+    here rather than a silent drift between what this module assumes and what
+    is actually on disk."""
+    assert embedding.INT8_MODEL_SHA256 == (
+        "eebed71d4f7671a4d8093decee1fb23018992e139813f30d502bf16ee408208e"
+    )
+
+
+def test_resolve_int8_model_paths_returns_the_int8_model_and_the_shared_fp32_tokenizer() -> (
+    None
+):
+    """The int8 arm's tokenizer is the fp32 arm's own file, not a second copy
+    under ``int8/`` (environment fact: "the tokenizer is shared with fp32")."""
+    model_path, tokenizer_path = embedding.resolve_int8_model_paths(
+        {"JOINLESS_MODEL_CACHE_DIR": "/some/cache"}
+    )
+
+    assert model_path == Path("/some/cache/int8/model.onnx")
+    assert tokenizer_path == Path("/some/cache/fp32/tokenizer.json")
+
+
+def test_resolve_int8_model_paths_raises_when_the_cache_dir_is_unset() -> None:
+    with pytest.raises(CacheDirNotSetError):
+        embedding.resolve_int8_model_paths({})
+
+
+def test_artifact_requirements_int8_names_the_int8_model_and_the_shared_fp32_tokenizer() -> (
+    None
+):
+    requirements = embedding.artifact_requirements_int8(
+        {"JOINLESS_MODEL_CACHE_DIR": "/some/cache"}
+    )
+
+    model_requirement, tokenizer_requirement = requirements
+    assert model_requirement.path == Path("/some/cache/int8/model.onnx")
+    assert model_requirement.sha256 == embedding.INT8_MODEL_SHA256
+    assert tokenizer_requirement.path == Path("/some/cache/fp32/tokenizer.json")
+    assert tokenizer_requirement.sha256 == embedding.FP32_TOKENIZER_SHA256
+
+
+def test_model_identity_int8_carries_the_pinned_identity_the_int8_checksum_and_licence() -> (
+    None
+):
+    """RFC-0001: "the fp32 and int8 arms are the same class with different
+    model artefacts" - same model id, revision and licence as the fp32 arm,
+    but the int8 artefact's own checksum, never the fp32 one."""
+    identity = embedding.model_identity_int8()
+
+    assert identity.model_id == embedding.MODEL_ID
+    assert identity.revision == embedding.MODEL_REVISION
+    assert identity.checksum_sha256 == embedding.INT8_MODEL_SHA256
+    assert identity.license == embedding.MODEL_LICENSE
+
+
+# --- probe_int8: dependency, configuration and artefact checks, cheapest-first -----
+
+
+def test_probe_int8_reports_a_missing_onnxruntime_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
+
+    reason = embedding.probe_int8({})
+
+    assert reason is not None
+    assert "onnxruntime" in reason
+    assert "joinless[neural]" in reason
+
+
+def test_probe_int8_reports_the_cache_dir_not_set_reason_once_dependencies_are_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_dependencies_present(monkeypatch)
+
+    reason = embedding.probe_int8({})
+
+    assert reason is not None
+    assert "JOINLESS_MODEL_CACHE_DIR" in reason
+
+
+def test_probe_int8_reports_a_missing_model_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_dependencies_present(monkeypatch)
+
+    reason = embedding.probe_int8({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert reason is not None
+    assert "artifact missing" in reason
+    assert str(tmp_path / "int8" / "model.onnx") in reason
+
+
+def test_probe_int8_reports_a_model_checksum_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_dependencies_present(monkeypatch)
+    _write_fixture(tmp_path / "int8" / "model.onnx", b"not the real graph")
+    # INT8_MODEL_SHA256 is left at its real, pinned value - which cannot match
+    # arbitrary fixture bytes - so this is a genuine mismatch, not a scripted one.
+
+    reason = embedding.probe_int8({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert reason is not None
+    assert "checksum mismatch" in reason
+
+
+def test_probe_int8_reports_a_missing_tokenizer_artifact_once_the_model_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared tokenizer is read from ``fp32/``, not ``int8/`` - the missing
+    file this reports is therefore the fp32 directory's copy."""
+    _fake_dependencies_present(monkeypatch)
+    model_digest = _write_fixture(
+        tmp_path / "int8" / "model.onnx", b"a fake int8 graph"
+    )
+    monkeypatch.setattr(embedding, "INT8_MODEL_SHA256", model_digest)
+
+    reason = embedding.probe_int8({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert reason is not None
+    assert "artifact missing" in reason
+    assert str(tmp_path / "fp32" / "tokenizer.json") in reason
+
+
+def test_probe_int8_returns_none_when_every_check_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_dependencies_present(monkeypatch)
+    model_digest = _write_fixture(
+        tmp_path / "int8" / "model.onnx", b"a fake int8 graph"
+    )
+    tokenizer_digest = _write_fixture(
+        tmp_path / "fp32" / "tokenizer.json", b"a fake tokenizer config"
+    )
+    monkeypatch.setattr(embedding, "INT8_MODEL_SHA256", model_digest)
+    monkeypatch.setattr(embedding, "FP32_TOKENIZER_SHA256", tokenizer_digest)
+
+    reason = embedding.probe_int8({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert reason is None
+
+
+# --- quantized-operator verification (issue #68) -----------------------------------
+#
+# "Record which operators were actually quantized" - read fresh from the int8 graph
+# at run time (never copied from the spike record), and checked against
+# INT8_QUANTIZED_OPERATORS, the operator census RFC-0004's spike recorded for the
+# exact artefact INT8_MODEL_SHA256 checksums (benchmarks/20260812T181752Z-
+# quantization-spike.json, "operators.added"). ``onnx`` is faked via
+# ``sys.modules``, never installed for real, the same way this file already fakes
+# ``onnxruntime`` and ``tokenizers`` (module docstring; ADR-0016 rule 2) - the CI
+# matrix's "dev" profile (.github/workflows/ci.yml) never installs ``onnx`` at all,
+# so a test that imported the real package here would pass under "dev,neural" and
+# fail under "dev" for a reason that has nothing to do with this module's own logic.
+
+
+class _FakeOnnxNode:
+    def __init__(self, op_type: str) -> None:
+        self.op_type = op_type
+
+
+class _FakeOnnxGraph:
+    def __init__(self, op_types: Sequence[str]) -> None:
+        self.node = [_FakeOnnxNode(op_type) for op_type in op_types]
+
+
+class _FakeOnnxModel:
+    def __init__(self, op_types: Sequence[str]) -> None:
+        self.graph = _FakeOnnxGraph(op_types)
+
+
+def _fake_onnx_module(op_types: Sequence[str]) -> types.ModuleType:
+    """A fake ``onnx`` module whose ``load`` returns an object exposing
+    ``graph.node`` with exactly ``op_types`` (as each node's ``.op_type``),
+    regardless of the path it is called with - a real file need not exist on
+    disk for :func:`embedding.read_operator_types` to be exercised against it.
+    """
+    module = types.ModuleType("onnx")
+
+    def _load(path: str) -> _FakeOnnxModel:
+        del path
+        return _FakeOnnxModel(op_types)
+
+    module.load = _load  # type: ignore[attr-defined]
+    return module
+
+
+def test_int8_quantized_operators_is_pinned_to_the_spike_records_added_operators() -> (
+    None
+):
+    """The value RFC-0004's spike recorded present in the int8 graph and absent
+    from the fp32 graph (benchmarks/20260812T181752Z-quantization-spike.json,
+    "operators.added") - pinned as a literal, mirroring
+    :data:`embedding.INT8_MODEL_SHA256`, so a change to it is a visible diff
+    here rather than a silent drift between what this module assumes and what
+    the recorded spike actually found."""
+    assert embedding.INT8_QUANTIZED_OPERATORS == (
+        "DynamicQuantizeLinear",
+        "MatMulInteger",
+    )
+
+
+def test_read_operator_types_returns_the_distinct_op_types_the_graph_contains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules, "onnx", _fake_onnx_module(["MatMul", "Add", "MatMul"])
+    )
+
+    found = embedding.read_operator_types(Path("/some/cache/int8/model.onnx"))
+
+    assert found == frozenset({"MatMul", "Add"})
+
+
+def test_read_operator_counts_returns_a_node_count_per_op_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fact :func:`embedding.read_operator_types` only ever reduces to a
+    set - a graph with 36 ``MatMulInteger`` nodes and one with a single such
+    node are indistinguishable through it. Issue #68's stated purpose ("how
+    many... converted and how many remain in fp32") needs the counts
+    themselves, not just which types are present."""
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx",
+        _fake_onnx_module(["MatMul", "Add", "MatMul", "MatMul"]),
+    )
+
+    counts = embedding.read_operator_counts(Path("/some/cache/int8/model.onnx"))
+
+    assert counts == {"MatMul": 3, "Add": 1}
+
+
+def test_quantized_operators_present_returns_only_the_replacement_types_found() -> None:
+    found = embedding.quantized_operators_present(
+        frozenset({"MatMul", "MatMulInteger", "Add"})
+    )
+
+    assert found == ("MatMulInteger",)
+
+
+def test_quantized_operators_present_returns_every_matching_type_sorted() -> None:
+    found = embedding.quantized_operators_present(
+        frozenset(
+            {"QLinearMatMul", "DynamicQuantizeLinear", "MatMulInteger", "Constant"}
+        )
+    )
+
+    assert found == ("DynamicQuantizeLinear", "MatMulInteger", "QLinearMatMul")
+
+
+def test_quantized_operators_present_is_empty_when_none_of_the_replacements_are_there() -> (
+    None
+):
+    assert embedding.quantized_operators_present(frozenset({"MatMul", "Add"})) == ()
+
+
+# --- matmul-conversion census (issue #68 finding 1): how many of the graph's
+# candidate-for-quantization operators actually converted, and how many remain
+# fp32 - the fact a bare operator-type list cannot answer, and the reason a
+# smaller int8 artefact with an unchanged latency reads as a puzzle instead of
+# the expected consequence of some matmuls not converting. -------------------
+
+
+def test_int8_matmul_conversion_is_pinned_to_the_spike_records_own_census() -> None:
+    """benchmarks/20260812T181752Z-quantization-spike.json's own
+    ``operators.matmul_conversion`` - pinned as a literal the same way
+    :data:`embedding.INT8_QUANTIZED_OPERATORS` is, for the exact artefact
+    :data:`embedding.INT8_MODEL_SHA256` checksums."""
+    from joinless.runrecord import MatmulConversion
+
+    assert embedding.INT8_MATMUL_CONVERSION == {
+        "Gemm": MatmulConversion(
+            converted_count=0, fp32_count=0, int8_count_remaining=0
+        ),
+        "MatMul": MatmulConversion(
+            converted_count=36, fp32_count=48, int8_count_remaining=12
+        ),
+    }
+
+
+def test_matmul_conversion_census_derives_counts_from_one_graphs_own_operator_counts() -> (
+    None
+):
+    """A converted node's *type* changes (``MatMul`` -> ``MatMulInteger``,
+    ``Gemm`` -> ``QGemm``), so the pre-conversion count is exactly
+    ``converted + remaining`` - derivable from the int8 graph's own counts
+    alone, with no need to read a second, earlier graph."""
+    from joinless.runrecord import MatmulConversion
+
+    census = embedding.matmul_conversion_census(
+        {"MatMulInteger": 36, "MatMul": 12, "DynamicQuantizeLinear": 24, "Add": 62}
+    )
+
+    assert census == {
+        "Gemm": MatmulConversion(
+            converted_count=0, fp32_count=0, int8_count_remaining=0
+        ),
+        "MatMul": MatmulConversion(
+            converted_count=36, fp32_count=48, int8_count_remaining=12
+        ),
+    }
+
+
+def _int8_graph_matching_the_pinned_census() -> list[str]:
+    """A synthetic graph whose operator counts equal
+    :data:`embedding.INT8_MATMUL_CONVERSION` exactly, for tests that need
+    :func:`embedding.verify_int8_operators` to succeed rather than raise."""
+    return ["DynamicQuantizeLinear"] + ["MatMulInteger"] * 36 + ["MatMul"] * 12
+
+
+def test_verify_int8_operators_returns_the_live_read_types_and_census_when_they_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules, "onnx", _fake_onnx_module(_int8_graph_matching_the_pinned_census())
+    )
+
+    found, census = embedding.verify_int8_operators(Path("/some/cache/int8/model.onnx"))
+
+    assert found == embedding.INT8_QUANTIZED_OPERATORS
+    assert census == embedding.INT8_MATMUL_CONVERSION
+
+
+def test_verify_int8_operators_raises_when_the_graph_is_missing_an_expected_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructing the mismatch directly (not reasoning about it, issue #68's
+    third bullet): a graph that never converted a single MatMul - present here
+    only as ``DynamicQuantizeLinear``, never ``MatMulInteger`` - is a graph
+    that does not match the recorded operator list, and this is the check
+    that catches it."""
+    monkeypatch.setitem(
+        sys.modules, "onnx", _fake_onnx_module(["MatMul", "DynamicQuantizeLinear"])
+    )
+    path = Path("/some/cache/int8/model.onnx")
+
+    with pytest.raises(embedding.QuantizedOperatorMismatchError) as excinfo:
+        embedding.verify_int8_operators(path)
+
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "MatMulInteger" in message
+
+
+def test_verify_int8_operators_raises_when_the_graph_has_an_extra_replacement_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction of the same mismatch: a graph whose quantized
+    operator census is a strict superset of what was recorded is just as much
+    "does not match" as a subset - equality is checked, not containment."""
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx",
+        _fake_onnx_module(["DynamicQuantizeLinear", "MatMulInteger", "QLinearMatMul"]),
+    )
+
+    with pytest.raises(embedding.QuantizedOperatorMismatchError):
+        embedding.verify_int8_operators(Path("/some/cache/int8/model.onnx"))
+
+
+def test_verify_int8_operators_raises_when_the_matmul_conversion_counts_do_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extension issue #68 finding 1 asks for: a graph whose replacement
+    operator *types* match (``DynamicQuantizeLinear`` and ``MatMulInteger``
+    both present, nothing extra) but whose *counts* do not - 30 conversions
+    where 36 are recorded - is just as much "does not match the recorded
+    operator list" as a missing type, now that the record carries counts.
+    The old, type-only check alone would have let this graph through."""
+    graph = ["DynamicQuantizeLinear"] + ["MatMulInteger"] * 30 + ["MatMul"] * 18
+    monkeypatch.setitem(sys.modules, "onnx", _fake_onnx_module(graph))
+    path = Path("/some/cache/int8/model.onnx")
+
+    with pytest.raises(embedding.QuantizedOperatorMismatchError) as excinfo:
+        embedding.verify_int8_operators(path)
+
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "30" in message
+    assert "36" in message
+
+
+# --- load_int8_scorer: real construction path, fake tokenizer/session --------------
+
+
+def test_load_int8_scorer_wires_a_real_tokenizer_from_fp32_and_a_session_from_int8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_onnxruntime, sessions_created = _build_fake_onnxruntime_module()
+    fake_tokenizers, from_file_paths, tokenizers_created = (
+        _build_fake_tokenizers_module()
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+    fp32_dir = tmp_path / "fp32"
+    int8_dir = tmp_path / "int8"
+    tokenizer_digest = _write_fixture(
+        fp32_dir / "tokenizer.json", b"a fake tokenizer config"
+    )
+    model_digest = _write_fixture(int8_dir / "model.onnx", b"a fake int8 graph")
+    monkeypatch.setattr(embedding, "INT8_MODEL_SHA256", model_digest)
+    monkeypatch.setattr(embedding, "FP32_TOKENIZER_SHA256", tokenizer_digest)
+
+    scorer = embedding.load_int8_scorer({"JOINLESS_MODEL_CACHE_DIR": str(tmp_path)})
+
+    assert isinstance(scorer, EmbeddingScorer)
+    assert scorer.name == "embed-int8"
+    assert from_file_paths == [str(fp32_dir / "tokenizer.json")]
+    assert sessions_created == [
+        {"path": str(int8_dir / "model.onnx"), "providers": ["CPUExecutionProvider"]}
+    ]
+    [tokenizer] = tokenizers_created
+    assert tokenizer.padding == {"pad_token": "[PAD]", "pad_id": 0}
+    assert tokenizer.truncation == {"max_length": 128}
+
+    prepared = scorer.prepare_all(["hi", "hello"])
+    assert len(prepared) == 2
+    assert all(value is not None for value in prepared)
 
 
 # --- load_fp32_scorer: real construction path, fake tokenizer/session --------------

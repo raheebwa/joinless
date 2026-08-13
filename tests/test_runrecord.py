@@ -47,7 +47,7 @@ def _environment() -> Environment:
         thread_count=1,
         warmup_count=5,
         repetition_count=20,
-        model=Maybe(value=None, reason="no neural arm in this run"),
+        models={},
         quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
     )
 
@@ -113,6 +113,23 @@ def test_model_identity_carries_the_model_cards_licence_alongside_its_identity()
     assert identity.license == "apache-2.0"
 
 
+def test_matmul_conversion_carries_converted_fp32_and_remaining_counts() -> None:
+    """Issue #68's stated purpose: "how many of the graph's matmuls were
+    converted and how many remain in fp32" - the three counts this type
+    exists to hold together, mirroring
+    benchmarks/20260812T181752Z-quantization-spike.json's own
+    "operators.matmul_conversion" shape (converted_count/fp32_count/
+    int8_count_remaining per operator type)."""
+    from joinless.runrecord import MatmulConversion
+
+    conversion = MatmulConversion(
+        converted_count=36, fp32_count=48, int8_count_remaining=12
+    )
+    assert conversion.converted_count == 36
+    assert conversion.fp32_count == 48
+    assert conversion.int8_count_remaining == 12
+
+
 # --- RunAssembly: expectations before any report (ADR-0011 rule 4, issue #50) -------
 
 from joinless.measurement import Unavailable
@@ -152,6 +169,9 @@ def test_build_rejects_a_run_with_no_arm_added() -> None:
             evaluation_set=_evaluation_set(),
             selected_thresholds=(),
             contradictions=(),
+            int8_accuracy_divergence=Maybe(
+                value=None, reason="not computed in this test"
+            ),
         )
 
 
@@ -168,6 +188,7 @@ def test_a_built_record_carries_the_expected_winners_given_at_construction() -> 
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
     assert record.expected_winners.winners == {"exact": "overlap"}
@@ -198,6 +219,7 @@ def test_a_built_record_carries_the_contradictions_it_was_given() -> None:
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(contradiction,),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
     assert record.contradictions == (contradiction,)
@@ -218,6 +240,7 @@ def test_a_run_with_no_broken_expectation_records_an_empty_contradictions_tuple(
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
     assert record.contradictions == ()
@@ -240,6 +263,7 @@ def _record_with(arm_result: ArmResult) -> RunRecord:
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
 
@@ -268,6 +292,232 @@ def test_record_to_dict_renders_an_absent_maybe_as_null_with_its_reason() -> Non
 
     onnxruntime = payload["environment"]["runtime_versions"]["onnxruntime"]
     assert onnxruntime == {"value": None, "reason": "no neural arm in this run"}
+
+
+# --- Environment.models: one entry per neural arm that actually loaded, keyed by
+# arm name (issue #67) - not a single Maybe[ModelIdentity] slot, because a run can
+# now load both the fp32 and the int8 arm's models at once, and a singular slot
+# would have to silently drop one of the two ------------------------------------
+
+
+def test_environment_models_is_empty_when_no_neural_arm_ran() -> None:
+    assert _environment().models == {}
+
+
+def test_record_to_dict_renders_one_model_identity_by_arm_name_when_one_neural_arm_ran() -> (
+    None
+):
+    from joinless.runrecord import ModelIdentity
+
+    fp32_identity = ModelIdentity(
+        model_id="sentence-transformers/all-MiniLM-L6-v2",
+        revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        checksum_sha256="e3fe9a9a8c877bd5ca0deebb6303aba138acc6818440211377afaca1ba78b511",
+        license="apache-2.0",
+    )
+    environment = Environment(
+        hardware=_environment().hardware,
+        runtime_versions=_environment().runtime_versions,
+        power_mode="ac",
+        thread_count=1,
+        warmup_count=5,
+        repetition_count=20,
+        models={"embed-fp32": fp32_identity},
+        quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+    )
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    assembly = RunAssembly(expected_winners=expected)
+    assembly.add_arm("overlap", _arm_result())
+    record = assembly.build(
+        schema="benchmark-v1",
+        started_at=_STARTED_AT,
+        command=("joinless", "benchmark"),
+        environment=environment,
+        evaluation_set=_evaluation_set(),
+        selected_thresholds=(),
+        contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
+    )
+
+    payload = record_to_dict(record)
+
+    assert payload["environment"]["models"] == {
+        "embed-fp32": {
+            "model_id": fp32_identity.model_id,
+            "revision": fp32_identity.revision,
+            "checksum_sha256": fp32_identity.checksum_sha256,
+            "license": fp32_identity.license,
+        }
+    }
+
+
+def test_record_to_dict_renders_both_neural_arms_model_identities_when_both_ran() -> (
+    None
+):
+    """The fact this module exists to guard: a run where both ``embed-fp32``
+    and ``embed-int8`` initialise records *both* checksums, not whichever the
+    run happened to measure last (RFC-0001: the two arms differ only in their
+    model artefact, and that artefact's checksum is exactly the fact a
+    dropped entry would lose)."""
+    from joinless.runrecord import ModelIdentity
+
+    fp32_identity = ModelIdentity(
+        model_id="sentence-transformers/all-MiniLM-L6-v2",
+        revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        checksum_sha256="e3fe9a9a8c877bd5ca0deebb6303aba138acc6818440211377afaca1ba78b511",
+        license="apache-2.0",
+    )
+    int8_identity = ModelIdentity(
+        model_id="sentence-transformers/all-MiniLM-L6-v2",
+        revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        checksum_sha256=(
+            "eebed71d4f7671a4d8093decee1fb23018992e139813f30d502bf16ee408208e"
+        ),
+        license="apache-2.0",
+    )
+    environment = Environment(
+        hardware=_environment().hardware,
+        runtime_versions=_environment().runtime_versions,
+        power_mode="ac",
+        thread_count=1,
+        warmup_count=5,
+        repetition_count=20,
+        models={"embed-fp32": fp32_identity, "embed-int8": int8_identity},
+        quantized_operators=Maybe(value=None, reason="not read in this test"),
+    )
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    assembly = RunAssembly(expected_winners=expected)
+    assembly.add_arm("overlap", _arm_result())
+    record = assembly.build(
+        schema="benchmark-v1",
+        started_at=_STARTED_AT,
+        command=("joinless", "benchmark"),
+        environment=environment,
+        evaluation_set=_evaluation_set(),
+        selected_thresholds=(),
+        contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
+    )
+
+    payload = record_to_dict(record)
+
+    models = payload["environment"]["models"]
+    assert models["embed-fp32"]["checksum_sha256"] == fp32_identity.checksum_sha256
+    assert models["embed-int8"]["checksum_sha256"] == int8_identity.checksum_sha256
+
+
+# --- Environment.quantized_operators: matmul-conversion counts, not a flat operator-
+# type list (issue #68's stated purpose: "how many of the graph's matmuls were
+# converted and how many remain in fp32" - a reader cannot answer that from a bare
+# ``["DynamicQuantizeLinear", "MatMulInteger"]``) ------------------------------------
+
+
+def test_record_to_dict_renders_quantized_operators_as_a_mapping_of_matmul_conversion_counts() -> (
+    None
+):
+    from joinless.runrecord import MatmulConversion
+
+    census = {
+        "Gemm": MatmulConversion(
+            converted_count=0, fp32_count=0, int8_count_remaining=0
+        ),
+        "MatMul": MatmulConversion(
+            converted_count=36, fp32_count=48, int8_count_remaining=12
+        ),
+    }
+    environment = Environment(
+        hardware=_environment().hardware,
+        runtime_versions=_environment().runtime_versions,
+        power_mode="ac",
+        thread_count=1,
+        warmup_count=5,
+        repetition_count=20,
+        models={},
+        quantized_operators=Maybe(value=census, reason=None),
+    )
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    assembly = RunAssembly(expected_winners=expected)
+    assembly.add_arm("overlap", _arm_result())
+    record = assembly.build(
+        schema="benchmark-v1",
+        started_at=_STARTED_AT,
+        command=("joinless", "benchmark"),
+        environment=environment,
+        evaluation_set=_evaluation_set(),
+        selected_thresholds=(),
+        contradictions=(),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
+    )
+
+    payload = record_to_dict(record)
+
+    assert payload["environment"]["quantized_operators"] == {
+        "value": {
+            "Gemm": {"converted_count": 0, "fp32_count": 0, "int8_count_remaining": 0},
+            "MatMul": {
+                "converted_count": 36,
+                "fp32_count": 48,
+                "int8_count_remaining": 12,
+            },
+        },
+        "reason": None,
+    }
+
+
+# --- RunRecord.int8_accuracy_divergence: per-family, computed once (issue #67) -----
+
+
+def test_record_to_dict_renders_an_absent_int8_accuracy_divergence_with_its_reason() -> (
+    None
+):
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    assert payload["int8_accuracy_divergence"] == {
+        "value": None,
+        "reason": "not computed in this test",
+    }
+
+
+def test_record_to_dict_renders_a_present_int8_accuracy_divergence_per_family() -> None:
+    from joinless.evaluation import AccuracyDivergence
+
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    assembly = RunAssembly(expected_winners=expected)
+    assembly.add_arm("overlap", _arm_result())
+    divergence = (
+        AccuracyDivergence(
+            family="exact",
+            baseline_f1=Metric(value=1.0, undefined_reason=None),
+            candidate_f1=Metric(value=0.9, undefined_reason=None),
+            delta_f1=Metric(value=-0.1, undefined_reason=None),
+        ),
+    )
+    record = assembly.build(
+        schema="benchmark-v1",
+        started_at=_STARTED_AT,
+        command=("joinless", "benchmark"),
+        environment=_environment(),
+        evaluation_set=_evaluation_set(),
+        selected_thresholds=(),
+        contradictions=(),
+        int8_accuracy_divergence=Maybe(value=divergence, reason=None),
+    )
+
+    payload = record_to_dict(record)
+
+    assert payload["int8_accuracy_divergence"] == {
+        "value": [
+            {
+                "family": "exact",
+                "baseline_f1": {"value": 1.0, "undefined_reason": None},
+                "candidate_f1": {"value": 0.9, "undefined_reason": None},
+                "delta_f1": {"value": -0.1, "undefined_reason": None},
+            }
+        ],
+        "reason": None,
+    }
 
 
 def test_record_to_dict_tags_an_ok_accuracy_report_with_its_status() -> None:
@@ -445,6 +695,7 @@ def test_record_to_dict_renders_a_contradiction_with_its_family_and_both_winners
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(contradiction,),
+        int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
     payload = record_to_dict(record)

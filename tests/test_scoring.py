@@ -334,9 +334,10 @@ def test_get_scorer_selects_the_fuzzy_arm_by_name() -> None:
 
 
 def test_get_scorer_rejects_a_genuinely_unknown_name_and_lists_the_known_ones() -> None:
-    """'nonesuch' names nothing this module ever defines - unlike ``embed-fp32``,
-    which is registered (below) and raises :class:`ScorerUnavailable` instead,
-    carrying a reason, when it cannot initialise."""
+    """'nonesuch' names nothing this module ever defines - unlike ``embed-fp32``
+    and ``embed-int8``, both registered (below), which raise
+    :class:`ScorerUnavailable` instead, carrying a reason, when they cannot
+    initialise."""
     with pytest.raises(ValueError, match="Unknown scorer") as excinfo:
         get_scorer("nonesuch")
 
@@ -365,6 +366,19 @@ def test_get_artifact_paths_names_the_fp32_model_and_tokenizer_files(
 
     assert paths == (
         Path("/some/cache/fp32/model.onnx"),
+        Path("/some/cache/fp32/tokenizer.json"),
+    )
+
+
+def test_get_artifact_paths_names_the_int8_model_and_the_shared_fp32_tokenizer_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", "/some/cache")
+
+    paths = get_artifact_paths("embed-int8")
+
+    assert paths == (
+        Path("/some/cache/int8/model.onnx"),
         Path("/some/cache/fp32/tokenizer.json"),
     )
 
@@ -466,6 +480,35 @@ def test_get_scorer_reports_embed_fp32_unavailable_without_a_configured_cache_di
     assert "JOINLESS_MODEL_CACHE_DIR" in excinfo.value.reason
 
 
+def test_get_scorer_reports_embed_int8_unavailable_when_onnxruntime_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors ``test_get_scorer_reports_embed_fp32_unavailable_when_onnxruntime_is_missing``
+    for the int8 arm: the registry's own probe (``_embed_int8_probe``) forwards
+    :func:`joinless.embedding.probe_int8`'s reason without altering it."""
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
+
+    with pytest.raises(ScorerUnavailable) as excinfo:
+        get_scorer("embed-int8")
+
+    assert excinfo.value.scorer_name == "embed-int8"
+    assert "onnxruntime" in excinfo.value.reason
+
+
+def test_get_scorer_reports_embed_int8_unavailable_without_a_configured_cache_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.ModuleType("onnxruntime"))
+    monkeypatch.setitem(sys.modules, "tokenizers", types.ModuleType("tokenizers"))
+    monkeypatch.delenv("JOINLESS_MODEL_CACHE_DIR", raising=False)
+
+    with pytest.raises(ScorerUnavailable) as excinfo:
+        get_scorer("embed-int8")
+
+    assert excinfo.value.scorer_name == "embed-int8"
+    assert "JOINLESS_MODEL_CACHE_DIR" in excinfo.value.reason
+
+
 def _fake_onnxruntime_and_tokenizers_modules() -> tuple[
     types.ModuleType, types.ModuleType
 ]:
@@ -541,6 +584,75 @@ def test_get_scorer_selects_the_embed_fp32_arm_through_the_full_registry_seam(
     assert scorer.name == "embed-fp32"
     prepared = scorer.prepare("Acme Traders")
     assert scorer.score(prepared, prepared) == 1.0
+
+
+def test_get_scorer_selects_the_embed_int8_arm_through_the_full_registry_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors ``test_get_scorer_selects_the_embed_fp32_arm_through_the_full_registry_seam``
+    for the int8 arm: proves ``get_scorer`` reaches a real, working
+    :class:`~joinless.embedding.EmbeddingScorer` for ``"embed-int8"`` through
+    ``_embed_int8_probe``/``_embed_int8_factory``, not by calling
+    ``joinless.embedding``'s own functions directly."""
+    fake_onnxruntime, fake_tokenizers = _fake_onnxruntime_and_tokenizers_modules()
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+    fp32_dir = tmp_path / "fp32"
+    int8_dir = tmp_path / "int8"
+    fp32_dir.mkdir(parents=True)
+    int8_dir.mkdir(parents=True)
+    tokenizer_bytes = b"a fake tokenizer config"
+    model_bytes = b"a fake int8 graph"
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    (int8_dir / "model.onnx").write_bytes(model_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "INT8_MODEL_SHA256", hashlib.sha256(model_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(tmp_path))
+
+    scorer = get_scorer("embed-int8")
+
+    assert scorer.name == "embed-int8"
+    prepared = scorer.prepare("Acme Traders")
+    assert scorer.score(prepared, prepared) == 1.0
+
+
+_EMBED_INT8_LAZY_IMPORT_PROBE = """
+import sys
+sys.modules["onnxruntime"] = None
+sys.modules["tokenizers"] = None
+from joinless.scoring import ScorerUnavailable, get_scorer
+try:
+    get_scorer("embed-int8")
+except ScorerUnavailable as exc:
+    assert exc.scorer_name == "embed-int8"
+    assert "onnxruntime" in exc.reason
+else:
+    raise AssertionError("expected ScorerUnavailable")
+"""
+
+
+def test_importing_scoring_never_imports_the_embedding_module_or_its_dependencies_for_int8() -> (
+    None
+):
+    """Mirrors ``test_importing_scoring_never_imports_the_embedding_module_or_its_dependencies``
+    for ``"embed-int8"`` - the same lazy-import boundary applies to both arms
+    the embedding module registers, not only the first one."""
+    result = subprocess.run(
+        [sys.executable, "-c", _EMBED_INT8_LAZY_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        "requesting the int8 embedding arm did not fail the way expected: "
+        f"{result.stdout.strip() or result.stderr.strip()}"
+    )
 
 
 _EMBED_FP32_LAZY_IMPORT_PROBE = """

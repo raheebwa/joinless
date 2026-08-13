@@ -834,3 +834,135 @@ def test_find_contradictions_skips_a_family_where_the_expected_arm_has_no_compar
     contradictions = find_contradictions(expected, reports)
 
     assert contradictions == ()
+
+
+# --- accuracy divergence: per-family F1 delta from a baseline arm (issue #67) -------
+
+
+def _multi_family_report(families: dict[str, float | None]):  # type: ignore[no-untyped-def]
+    """A report carrying one :class:`~joinless.evaluation.FamilyResult` per
+    ``families`` entry - ``None`` produces an undefined F1 (no predicted
+    positives), a float produces a defined one with matching precision and
+    recall, mirroring :func:`_report_with_f1` but for more than one family at
+    once, which every divergence test below needs."""
+    from joinless.evaluation import AggregateResult, EvaluationReport, FamilyResult
+
+    rows = []
+    for family, value in families.items():
+        if value is None:
+            metric = Metric(value=None, undefined_reason="no predicted positives")
+            rows.append(
+                FamilyResult(
+                    family=family,
+                    precision=metric,
+                    recall=metric,
+                    f1=metric,
+                    true_positives=0,
+                    predicted_positives=0,
+                    actual_positives=1,
+                )
+            )
+        else:
+            metric = Metric(value=value, undefined_reason=None)
+            rows.append(
+                FamilyResult(
+                    family=family,
+                    precision=metric,
+                    recall=metric,
+                    f1=metric,
+                    true_positives=1,
+                    predicted_positives=1,
+                    actual_positives=1,
+                )
+            )
+    aggregate = AggregateResult(
+        precision=rows[0].precision,
+        recall=rows[0].recall,
+        f1=rows[0].f1,
+        derivation="pooled",
+    )
+    return EvaluationReport(
+        per_family=tuple(rows), aggregate=aggregate, n_pairs=len(rows)
+    )
+
+
+def test_accuracy_divergence_reports_a_delta_per_family() -> None:
+    from joinless.evaluation import compute_accuracy_divergence
+
+    baseline = _multi_family_report({"exact": 1.0, "character noise": 0.8})
+    candidate = _multi_family_report({"exact": 0.9, "character noise": 0.85})
+
+    divergence = compute_accuracy_divergence(baseline=baseline, candidate=candidate)
+
+    by_family = {row.family: row for row in divergence}
+    assert by_family["exact"].baseline_f1.value == 1.0
+    assert by_family["exact"].candidate_f1.value == 0.9
+    assert by_family["exact"].delta_f1.value == pytest.approx(-0.1)
+    assert by_family["character noise"].delta_f1.value == pytest.approx(0.05)
+
+
+def test_accuracy_divergence_preserves_the_baselines_family_order() -> None:
+    from joinless.evaluation import compute_accuracy_divergence
+
+    baseline = _multi_family_report(
+        {"transliteration": 0.7, "exact": 1.0, "abbreviation": 0.6}
+    )
+    candidate = _multi_family_report(
+        {"exact": 0.9, "abbreviation": 0.5, "transliteration": 0.65}
+    )
+
+    divergence = compute_accuracy_divergence(baseline=baseline, candidate=candidate)
+
+    assert [row.family for row in divergence] == [
+        "transliteration",
+        "exact",
+        "abbreviation",
+    ]
+
+
+def test_accuracy_divergence_is_undefined_when_the_baseline_f1_is_undefined() -> None:
+    from joinless.evaluation import compute_accuracy_divergence
+
+    baseline = _multi_family_report({"exact": None})
+    candidate = _multi_family_report({"exact": 0.9})
+
+    [row] = compute_accuracy_divergence(baseline=baseline, candidate=candidate)
+
+    assert row.delta_f1.value is None
+    assert row.delta_f1.undefined_reason is not None
+    assert "baseline" in row.delta_f1.undefined_reason
+
+
+def test_accuracy_divergence_is_undefined_when_the_candidate_f1_is_undefined() -> None:
+    from joinless.evaluation import compute_accuracy_divergence
+
+    baseline = _multi_family_report({"exact": 1.0})
+    candidate = _multi_family_report({"exact": None})
+
+    [row] = compute_accuracy_divergence(baseline=baseline, candidate=candidate)
+
+    assert row.delta_f1.value is None
+    assert row.delta_f1.undefined_reason is not None
+    assert "candidate" in row.delta_f1.undefined_reason
+
+
+def test_accuracy_divergence_is_undefined_when_the_candidate_never_reported_the_family() -> (
+    None
+):
+    """A family the baseline reports but the candidate does not is not silently
+    skipped from the table (ADR-0013): it appears with an explicit reason,
+    naming the gap rather than letting a missing family look like it was never
+    checked."""
+    from joinless.evaluation import compute_accuracy_divergence
+
+    baseline = _multi_family_report({"exact": 1.0, "near-miss negative": 0.8})
+    candidate = _multi_family_report({"exact": 0.9})
+
+    divergence = compute_accuracy_divergence(baseline=baseline, candidate=candidate)
+
+    by_family = {row.family: row for row in divergence}
+    missing = by_family["near-miss negative"]
+    assert missing.candidate_f1.value is None
+    assert missing.candidate_f1.undefined_reason is not None
+    assert "near-miss negative" in missing.candidate_f1.undefined_reason
+    assert missing.delta_f1.value is None

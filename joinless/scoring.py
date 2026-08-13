@@ -35,13 +35,15 @@ the standard library. That is the same boundary ADR-0014 draws around the
 inference runtime, applied to the one arm here that has a dependency to keep
 out of the other's way.
 
-The ``embed-fp32`` arm is :class:`joinless.embedding.EmbeddingScorer`, not
-defined here — its dependencies (``onnxruntime``, ``tokenizers``) and its
-artefact are heavier than a lazy ``import`` inside one constructor can hide,
-so it gets its own module (ADR-0002, ADR-0014, ADR-0017). What lives here is
-the seam: :func:`_embed_fp32_probe`, :func:`_embed_fp32_factory` and
-:func:`_embed_fp32_artifact_paths` each import :mod:`joinless.embedding`
-lazily, at call time, exactly like
+``embed-fp32`` and ``embed-int8`` are both :class:`joinless.embedding.EmbeddingScorer`
+— the same class, over different model artefacts (RFC-0001) — not defined here — their
+shared dependencies (``onnxruntime``, ``tokenizers``) and their artefacts are heavier
+than a lazy ``import`` inside one constructor can hide, so they get their own module
+(ADR-0002, ADR-0007, ADR-0014, ADR-0017). What lives here is the seam: each arm's own
+probe/factory/artefact-paths trio — :func:`_embed_fp32_probe`, :func:`_embed_fp32_factory`
+and :func:`_embed_fp32_artifact_paths` for fp32; :func:`_embed_int8_probe`,
+:func:`_embed_int8_factory` and :func:`_embed_int8_artifact_paths` for int8 — each
+importing :mod:`joinless.embedding` lazily, at call time, exactly like
 :func:`_fuzzy_probe` imports ``rapidfuzz`` lazily — so a classical-only run
 never reaches :mod:`joinless.embedding`, let alone the inference runtime it
 eventually imports, and :mod:`joinless.embedding` is free to import
@@ -308,6 +310,23 @@ def _embed_fp32_factory() -> Scorer[Any]:
     return embedding.load_fp32_scorer()
 
 
+def _embed_int8_probe() -> str | None:
+    """Mirrors :func:`_embed_fp32_probe` exactly, over
+    :func:`joinless.embedding.probe_int8` instead — this is the check
+    :func:`get_scorer` runs before it will construct the int8 embedding arm."""
+    from joinless import embedding
+
+    return embedding.probe_int8()
+
+
+def _embed_int8_factory() -> Scorer[Any]:
+    """Mirrors :func:`_embed_fp32_factory` exactly, over
+    :func:`joinless.embedding.load_int8_scorer` instead."""
+    from joinless import embedding
+
+    return embedding.load_int8_scorer()
+
+
 def _no_artifact_paths() -> tuple[Path, ...]:
     """Overlap and fuzzy carry no model artefact (ADR-0003): an explicit empty
     tuple, not a call into :mod:`joinless.embedding` that happens to return
@@ -327,6 +346,16 @@ def _embed_fp32_artifact_paths() -> tuple[Path, ...]:
 
     return tuple(
         requirement.path for requirement in embedding.artifact_requirements_fp32()
+    )
+
+
+def _embed_int8_artifact_paths() -> tuple[Path, ...]:
+    """Mirrors :func:`_embed_fp32_artifact_paths` exactly, over
+    :func:`joinless.embedding.artifact_requirements_int8` instead."""
+    from joinless import embedding
+
+    return tuple(
+        requirement.path for requirement in embedding.artifact_requirements_int8()
     )
 
 
@@ -353,6 +382,11 @@ _SCORERS: Mapping[str, _Registration] = {
         factory=_embed_fp32_factory,
         probe=_embed_fp32_probe,
         artifact_paths=_embed_fp32_artifact_paths,
+    ),
+    "embed-int8": _Registration(
+        factory=_embed_int8_factory,
+        probe=_embed_int8_probe,
+        artifact_paths=_embed_int8_artifact_paths,
     ),
 }
 
