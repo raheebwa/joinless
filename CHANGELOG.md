@@ -52,3 +52,15 @@ warns nobody.
   inference-only install carries no model-hub tooling.
 - Artifact size on disk recorded per arm, making the storage cost of an arm part of the
   record rather than a figure a reader has to go and measure.
+- The `embed-int8` arm, on RFC-0004's spike record recording a "go": the same
+  `EmbeddingScorer` class the `embed-fp32` arm uses, over the dynamically-quantized
+  graph, sharing the fp32 arm's tokenizer file. A run can now load both arms' model
+  checksums at once, each recorded under its own name rather than one overwriting the
+  other. The int8 arm's per-family F1 divergence from the fp32 arm, computed from both
+  arms' own accuracy reports in the same run, is a new field on every run record.
+- The int8 arm's matmul-conversion census — how many of each candidate operator type
+  converted and how many remain fp32, not just which replacement operator types are
+  present — read from its graph fresh on every run rather than carried over from the
+  spike record, and checked against the exact census that graph is recorded to have: a
+  run whose graph does not match it, on operator types or on counts, writes no record
+  at all.
