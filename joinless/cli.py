@@ -353,7 +353,7 @@ _REPETITION_COUNT = 20
 # reported as a result rather than left for a reader to derive). A new required
 # field anywhere in the record is the same breaking shape change the v2 -> v3
 # comment above already names the policy for.
-_SCHEMA = "benchmark-v5"
+_SCHEMA = "benchmark-v4"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and

@@ -212,6 +212,18 @@ else:
 """
 
 
+# What the warm-latency figure covers, carried on every value it produces. The
+# timed section is `score` alone: both operands are prepared once before it, so
+# the graph a neural arm runs never executes inside it. Stated on the figure
+# because the alternative is a reader concluding from two near-identical warm
+# p50s that quantization bought nothing, when the inference cost it does move
+# sits in preparation cost instead (issue #65, ADR-0009).
+WARM_LATENCY_SCOPE = (
+    "score only; both operands are prepared before the timed section, so no "
+    "preparation cost is included in this figure"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class WarmLatency:
     """Per-comparison scoring latency at the median and the 99th percentile,
@@ -225,6 +237,7 @@ class WarmLatency:
     p99_seconds: float
     warmup_count: int
     repetition_count: int
+    scope: str = WARM_LATENCY_SCOPE
 
 
 def measure_warm_latency(
