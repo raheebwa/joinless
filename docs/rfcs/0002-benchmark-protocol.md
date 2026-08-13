@@ -1,6 +1,6 @@
 # RFC-0002 — Benchmark protocol
 
-**Status:** Draft · **Date:** 2026-08-12 · **Implements:** PRD MR-1 … MR-12 · **Bound by:** ADR-0011, ADR-0013
+**Status:** Draft · **Date:** 2026-08-12 · **Implements:** PRD MR-1 … MR-12 · **Bound by:** ADR-0011, ADR-0013, ADR-0014
 
 ## Summary
 
@@ -69,7 +69,12 @@ record. Scores are matcher-specific and are never transferred between arms (RFC-
 | Precision | correct matches / proposed matches | catches over-eager matching |
 | Recall | correct matches / true matches | catches missed links |
 | F1 | harmonic mean | single comparable number |
-| Cold start | new process, model load through first inference | paid once per invocation; dominates short runs |
+| Cold start — interpreter start | process launch to the first line of user code, new process per arm | identical across all four arms; not attributable to the matcher |
+| Cold start — import | `import joinless` plus the arm's own imports | attributable — the neural arms pay ONNX Runtime's import cost that the classical arms never incur (ADR-0014) |
+| Cold start — session creation | inference session construction from the artefact | attributable; `null` for the classical arms, which construct no session (MR-17) |
+| Cold start — tokenizer load | tokenizer construction from the artefact | attributable; `null` for the classical arms, which load no tokenizer (MR-17) |
+| Cold start — first inference | first embedding call, uninitialised caches | attributable |
+| Cold start (total) | sum of the five phases above | derived, never itself measured — exactly one set of quantities is recorded |
 | Warm scoring p50 / p99 | per-comparison, after warm-up | steady-state cost; p99 is what a user feels |
 | Batched preparation | per-record embedding at documented batch sizes | the production path under ADR-0009 |
 | Naive preparation | per-comparison embedding | the control the hoist is measured against |
@@ -84,6 +89,18 @@ Cold start is reported separately rather than amortised into per-comparison late
 are different costs with different regimes: a long batch job amortises cold start to
 nothing, while a short interactive run is dominated by it. Smearing them together produces
 a number that describes neither.
+
+Cold start is itself decomposed into phases rather than reported as one number, because a
+single figure bundles costs with different owners. Interpreter start is identical across all
+four arms and is not attributable to the matcher — it is paid by the process, not the arm, so
+folding it into a per-arm figure credits or blames whichever arm happens to be measured for a
+cost none of them controls. Import, session creation, tokenizer load and first inference are
+each attributable: import cost differs because the neural arms pull in ONNX Runtime and the
+classical arms do not (ADR-0014); session creation, tokenizer load and first inference exist
+only for the arms that load a model and are reported as `null` with that reason for the arms
+that do not (MR-17). The total is derived by summing the phases and is never measured on its
+own — exactly one set of quantities is recorded per run, the phase figures, and the total is
+arithmetic on them rather than a second measurement that could disagree with the first.
 
 ### Method
 
@@ -100,8 +117,17 @@ a number that describes neither.
    warm-up count, repetition count, power mode — into the run record.
 6. **Randomise arm order across repeats.** Sustained runs on a laptop throttle, so a fixed
    order systematically favours whichever arm runs while the machine is coolest.
-7. **Isolate memory measurement.** Peak RSS is taken in a fresh child process per arm;
-   arms measured in one process report the high-water mark of whichever ran first.
+7. **Isolate every resource metric.** Cold start (and its phases), warm scoring, preparation
+   cost and peak RSS are each taken in a fresh child process per arm, not only memory. The
+   reason is the same for all of them: shared imports and retained allocations contaminate
+   whichever metric is being read in that process, not memory alone — a warm allocator and a
+   warm page cache make whichever arm runs second look faster, and a runtime already
+   imported by an earlier arm makes the next arm's import cost disappear. Arms measured in
+   one process report the high-water mark, or the warmed-up cost, of whichever ran first,
+   never their own. ADR-0014's install-profile invariant is what makes the isolation
+   enforceable rather than assumed: a fresh child process per arm is the only way "the
+   classical arm did not import the runtime" is a fact about that process, not a hope about
+   which arm happened to run first.
 8. **One command** reproduces everything.
 
 ### Output
