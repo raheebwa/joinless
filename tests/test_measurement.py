@@ -8,7 +8,8 @@ import hashlib
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from joinless.measurement import ArtifactRequirement, verify_artifact
@@ -609,7 +610,11 @@ def test_measure_peak_memory_is_unavailable_for_an_arm_that_cannot_initialise() 
 
 # --- measure_cold_start(): five phases, reported separately (issue #56) -----------
 
-from joinless.measurement import measure_cold_start
+from joinless.measurement import (
+    _NO_SESSION_REASON,
+    _NO_TOKENIZER_REASON,
+    measure_cold_start,
+)
 
 
 def test_measure_cold_start_reports_interpreter_start_and_import_as_defined() -> None:
@@ -666,6 +671,98 @@ def test_measure_cold_start_total_sums_only_the_defined_phases() -> None:
     expected = (
         result.interpreter_start.value
         + result.import_phase.value
+        + result.first_inference.value
+    )
+    assert result.total.value == expected
+
+
+def _fake_cold_start_run(
+    *, session_creation_seconds: float, tokenizer_load_seconds: float
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A worker payload shaped like a neural arm's real cold-start report — real
+    numbers for the two phases a classical arm never carries — so
+    ``measure_cold_start``'s own branching can be proven without a model artefact
+    on disk (issue #108: the fake worker stands in for onnxruntime/tokenizers
+    being installed and a real model being cached, neither of which this test
+    needs to make its point about the parent function's branching).
+    """
+
+    def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        payload = json.dumps(
+            {
+                "status": "ok",
+                "child_start_epoch": time.time(),
+                "import_seconds": 0.05,
+                "session_creation_seconds": session_creation_seconds,
+                "tokenizer_load_seconds": tokenizer_load_seconds,
+                "first_inference_seconds": 0.01,
+            }
+        )
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=payload, stderr=""
+        )
+
+    return _fake_run
+
+
+def test_measure_cold_start_reports_session_creation_and_tokenizer_load_as_defined_for_a_neural_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "joinless.measurement.subprocess.run",
+        _fake_cold_start_run(session_creation_seconds=0.2, tokenizer_load_seconds=0.03),
+    )
+
+    result = measure_cold_start("embed-fp32", "Acme Traders", "Acme Trading Co")
+
+    assert not isinstance(result, Unavailable)
+    assert result.session_creation.value == 0.2
+    assert result.session_creation.undefined_reason is None
+    assert result.tokenizer_load.value == 0.03
+    assert result.tokenizer_load.undefined_reason is None
+
+
+def test_measure_cold_start_a_neural_arm_never_carries_the_classical_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done-when bullet 3 (issue #108): a neural arm's phases must not read
+    "classical arms construct no session" / "classical arms load no tokenizer"
+    once construction actually reports a duration."""
+    monkeypatch.setattr(
+        "joinless.measurement.subprocess.run",
+        _fake_cold_start_run(session_creation_seconds=0.2, tokenizer_load_seconds=0.03),
+    )
+
+    result = measure_cold_start("embed-int8", "Acme Traders", "Acme Trading Co")
+
+    assert not isinstance(result, Unavailable)
+    assert result.session_creation.undefined_reason != _NO_SESSION_REASON
+    assert result.tokenizer_load.undefined_reason != _NO_TOKENIZER_REASON
+
+
+def test_measure_cold_start_total_includes_session_creation_and_tokenizer_load_for_a_neural_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Done-when bullet 4 (issue #108): total no longer drops the model-load cost."""
+    monkeypatch.setattr(
+        "joinless.measurement.subprocess.run",
+        _fake_cold_start_run(session_creation_seconds=0.2, tokenizer_load_seconds=0.03),
+    )
+
+    result = measure_cold_start("embed-fp32", "Acme Traders", "Acme Trading Co")
+
+    assert not isinstance(result, Unavailable)
+    assert result.interpreter_start.value is not None
+    assert result.import_phase.value is not None
+    assert result.session_creation.value is not None
+    assert result.tokenizer_load.value is not None
+    assert result.first_inference.value is not None
+    expected = (
+        result.interpreter_start.value
+        + result.import_phase.value
+        + result.session_creation.value
+        + result.tokenizer_load.value
         + result.first_inference.value
     )
     assert result.total.value == expected
