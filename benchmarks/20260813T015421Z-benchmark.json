@@ -1,0 +1,552 @@
+{
+  "command": [
+    "joinless",
+    "benchmark"
+  ],
+  "contradictions": [
+    {
+      "actual_winner": "overlap",
+      "expected_winner": "fuzzy",
+      "family": "transliteration"
+    }
+  ],
+  "environment": {
+    "hardware": {
+      "cpu_count": 12,
+      "machine": "arm64",
+      "python_version": "3.14.5",
+      "release": "25.5.0",
+      "system": "Darwin",
+      "total_memory_bytes": 34359738368
+    },
+    "model": {
+      "reason": "no neural arm in this run",
+      "value": null
+    },
+    "power_mode": "ac",
+    "quantized_operators": {
+      "reason": "no int8 arm in this run",
+      "value": null
+    },
+    "repetition_count": 20,
+    "runtime_versions": {
+      "onnxruntime": {
+        "reason": "no neural arm in this run",
+        "value": null
+      },
+      "rapidfuzz": "3.14.5"
+    },
+    "thread_count": 1,
+    "warmup_count": 5
+  },
+  "evaluation_set": {
+    "case_mixture": {
+      "abbreviation": 150,
+      "character noise": 150,
+      "exact": 150,
+      "formatting": 150,
+      "near-miss negative": 450,
+      "semantic alias": 450,
+      "transliteration": 150,
+      "word order": 150
+    },
+    "seeds": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  "expected_winners": {
+    "winners": {
+      "abbreviation": "overlap",
+      "character noise": "fuzzy",
+      "exact": "overlap",
+      "formatting": "overlap",
+      "near-miss negative": "embed-fp32",
+      "semantic alias": "overlap",
+      "transliteration": "fuzzy",
+      "word order": "overlap"
+    }
+  },
+  "record_id": "20260813T015421Z-benchmark.json",
+  "results": {
+    "embed-fp32": {
+      "accuracy": {
+        "reason": "Unknown scorer 'embed-fp32'. Available scorers: fuzzy, overlap.",
+        "status": "invalid"
+      },
+      "cold_start": {
+        "arm": "embed-fp32",
+        "reason": "Unknown scorer 'embed-fp32'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      },
+      "peak_memory": {
+        "arm": "embed-fp32",
+        "reason": "Unknown scorer 'embed-fp32'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      },
+      "warm_latency": {
+        "arm": "embed-fp32",
+        "reason": "Unknown scorer 'embed-fp32'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      }
+    },
+    "embed-int8": {
+      "accuracy": {
+        "reason": "Unknown scorer 'embed-int8'. Available scorers: fuzzy, overlap.",
+        "status": "invalid"
+      },
+      "cold_start": {
+        "arm": "embed-int8",
+        "reason": "Unknown scorer 'embed-int8'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      },
+      "peak_memory": {
+        "arm": "embed-int8",
+        "reason": "Unknown scorer 'embed-int8'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      },
+      "warm_latency": {
+        "arm": "embed-int8",
+        "reason": "Unknown scorer 'embed-int8'. Available scorers: fuzzy, overlap.",
+        "status": "unavailable"
+      }
+    },
+    "fuzzy": {
+      "accuracy": {
+        "aggregate": {
+          "derivation": "sum true positives, predicted positives and actual positives across every family in the per-family table, then compute precision, recall and F1 from those pooled counts \u2014 never computed independently of the table",
+          "f1": {
+            "undefined_reason": null,
+            "value": 0.8863636363636362
+          },
+          "precision": {
+            "undefined_reason": null,
+            "value": 0.975
+          },
+          "recall": {
+            "undefined_reason": null,
+            "value": 0.8125
+          }
+        },
+        "per_family": [
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "exact",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "formatting",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "word order",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 0.9743589743589743
+            },
+            "family": "abbreviation",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 38,
+            "recall": {
+              "undefined_reason": null,
+              "value": 0.95
+            },
+            "true_positives": 38
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": "precision is undefined: no predicted positives",
+              "value": null
+            },
+            "family": "character noise",
+            "precision": {
+              "undefined_reason": "no predicted positives",
+              "value": null
+            },
+            "predicted_positives": 0,
+            "recall": {
+              "undefined_reason": null,
+              "value": 0.0
+            },
+            "true_positives": 0
+          },
+          {
+            "actual_positives": 0,
+            "f1": {
+              "undefined_reason": "precision is undefined: no predicted positives",
+              "value": null
+            },
+            "family": "semantic alias",
+            "precision": {
+              "undefined_reason": "no predicted positives",
+              "value": null
+            },
+            "predicted_positives": 0,
+            "recall": {
+              "undefined_reason": "no actual positives",
+              "value": null
+            },
+            "true_positives": 0
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 0.961038961038961
+            },
+            "family": "transliteration",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 37,
+            "recall": {
+              "undefined_reason": null,
+              "value": 0.925
+            },
+            "true_positives": 37
+          },
+          {
+            "actual_positives": 0,
+            "f1": {
+              "undefined_reason": "recall is undefined: no actual positives",
+              "value": null
+            },
+            "family": "near-miss negative",
+            "precision": {
+              "undefined_reason": null,
+              "value": 0.0
+            },
+            "predicted_positives": 5,
+            "recall": {
+              "undefined_reason": "no actual positives",
+              "value": null
+            },
+            "true_positives": 0
+          }
+        ],
+        "status": "ok"
+      },
+      "cold_start": {
+        "arm": "fuzzy",
+        "first_inference": {
+          "undefined_reason": null,
+          "value": 3.645801916718483e-05
+        },
+        "import_phase": {
+          "undefined_reason": null,
+          "value": 0.007449749973602593
+        },
+        "interpreter_start": {
+          "undefined_reason": null,
+          "value": 0.017521142959594727
+        },
+        "not_attributable": [
+          "interpreter start"
+        ],
+        "session_creation": {
+          "undefined_reason": "classical arms construct no session",
+          "value": null
+        },
+        "status": "ok",
+        "tokenizer_load": {
+          "undefined_reason": "classical arms load no tokenizer",
+          "value": null
+        }
+      },
+      "peak_memory": {
+        "arm": "fuzzy",
+        "peak_rss_bytes": 23904256,
+        "power_mode": "ac",
+        "status": "ok",
+        "thread_count": 1
+      },
+      "warm_latency": {
+        "arm": "fuzzy",
+        "p50_seconds": 9.170034900307655e-07,
+        "p99_seconds": 3.1249364838004112e-06,
+        "repetition_count": 20,
+        "status": "ok",
+        "warmup_count": 5
+      }
+    },
+    "overlap": {
+      "accuracy": {
+        "aggregate": {
+          "derivation": "sum true positives, predicted positives and actual positives across every family in the per-family table, then compute precision, recall and F1 from those pooled counts \u2014 never computed independently of the table",
+          "f1": {
+            "undefined_reason": null,
+            "value": 0.7207207207207206
+          },
+          "precision": {
+            "undefined_reason": null,
+            "value": 0.6349206349206349
+          },
+          "recall": {
+            "undefined_reason": null,
+            "value": 0.8333333333333334
+          }
+        },
+        "per_family": [
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "exact",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "formatting",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "word order",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "abbreviation",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": "precision is undefined: no predicted positives",
+              "value": null
+            },
+            "family": "character noise",
+            "precision": {
+              "undefined_reason": "no predicted positives",
+              "value": null
+            },
+            "predicted_positives": 0,
+            "recall": {
+              "undefined_reason": null,
+              "value": 0.0
+            },
+            "true_positives": 0
+          },
+          {
+            "actual_positives": 0,
+            "f1": {
+              "undefined_reason": "precision is undefined: no predicted positives",
+              "value": null
+            },
+            "family": "semantic alias",
+            "precision": {
+              "undefined_reason": "no predicted positives",
+              "value": null
+            },
+            "predicted_positives": 0,
+            "recall": {
+              "undefined_reason": "no actual positives",
+              "value": null
+            },
+            "true_positives": 0
+          },
+          {
+            "actual_positives": 40,
+            "f1": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "family": "transliteration",
+            "precision": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "predicted_positives": 40,
+            "recall": {
+              "undefined_reason": null,
+              "value": 1.0
+            },
+            "true_positives": 40
+          },
+          {
+            "actual_positives": 0,
+            "f1": {
+              "undefined_reason": "recall is undefined: no actual positives",
+              "value": null
+            },
+            "family": "near-miss negative",
+            "precision": {
+              "undefined_reason": null,
+              "value": 0.0
+            },
+            "predicted_positives": 115,
+            "recall": {
+              "undefined_reason": "no actual positives",
+              "value": null
+            },
+            "true_positives": 0
+          }
+        ],
+        "status": "ok"
+      },
+      "cold_start": {
+        "arm": "overlap",
+        "first_inference": {
+          "undefined_reason": null,
+          "value": 9.499955922365189e-06
+        },
+        "import_phase": {
+          "undefined_reason": null,
+          "value": 0.007379792048595846
+        },
+        "interpreter_start": {
+          "undefined_reason": null,
+          "value": 0.018260955810546875
+        },
+        "not_attributable": [
+          "interpreter start"
+        ],
+        "session_creation": {
+          "undefined_reason": "classical arms construct no session",
+          "value": null
+        },
+        "status": "ok",
+        "tokenizer_load": {
+          "undefined_reason": "classical arms load no tokenizer",
+          "value": null
+        }
+      },
+      "peak_memory": {
+        "arm": "overlap",
+        "peak_rss_bytes": 21905408,
+        "power_mode": "ac",
+        "status": "ok",
+        "thread_count": 1
+      },
+      "warm_latency": {
+        "arm": "overlap",
+        "p50_seconds": 2.0908191800117493e-07,
+        "p99_seconds": 5.420297384262085e-07,
+        "repetition_count": 20,
+        "status": "ok",
+        "warmup_count": 5
+      }
+    }
+  },
+  "schema": "benchmark-v1",
+  "selected_thresholds": [
+    {
+      "n_pairs": 430,
+      "procedure": "sweep every similarity score the scorer produces on the calibration split as a threshold candidate; keep whichever candidate maximises calibration F1, breaking a tie toward the lowest candidate that achieves it",
+      "role": "calibration",
+      "scorer_name": "overlap",
+      "value": 0.5
+    },
+    {
+      "n_pairs": 430,
+      "procedure": "sweep every similarity score the scorer produces on the calibration split as a threshold candidate; keep whichever candidate maximises calibration F1, breaking a tie toward the lowest candidate that achieves it",
+      "role": "calibration",
+      "scorer_name": "fuzzy",
+      "value": 0.9333333333333332
+    }
+  ],
+  "started_at": "2026-08-13T01:54:21.852038+00:00"
+}
