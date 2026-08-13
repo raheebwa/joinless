@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import cast
 
 import pytest
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
+from joinless.embedding import EmbeddingScorer
 from joinless.records import Record, content_id, record_id
 from joinless.resolver import (
     _REASON_NO_CANDIDATES,
@@ -709,6 +712,153 @@ def test_swapping_the_scorer_changes_which_pairs_match_and_nothing_else() -> Non
     )
     assert (
         untouchable_overlap.reason == untouchable_fuzzy.reason == _REASON_NO_COORDINATES
+    )
+
+
+# --- Substitution invariant for the embedding arm (issue #60's third bullet) -------
+
+
+@dataclass(frozen=True)
+class _FixedEncoding:
+    """The three fields :mod:`joinless.embedding` reads off a real
+    ``tokenizers.Encoding`` (its own ``_Encoding`` protocol) - nothing more."""
+
+    ids: list[int]
+    attention_mask: list[int]
+    type_ids: list[int]
+
+
+class _FixedVectorTokenizer:
+    """A tokenizer double: one token per name, whose id is that name's position
+    in ``vectors`` - so :class:`_FixedVectorSession` below can look the
+    pre-assigned vector straight back up by id. This is not a claim about the
+    real tokenizer's behaviour, only the same amount of surface
+    ``tests/test_embedding.py`` already fakes for :class:`EmbeddingScorer`'s own
+    tests (that module's docstring: "there is nothing there for a test to fake
+    but two small objects exposing ``encode_batch`` and ``run``") - reused here
+    so this test exercises the real, un-doubled resolver and the real, un-doubled
+    ``EmbeddingScorer.prepare_all``/``prepare``/``score`` arithmetic, with a
+    controlled embedding standing in for the 90 MB production graph and the
+    inference runtime that would otherwise have to be installed and fetched for
+    this test to run at all.
+    """
+
+    def __init__(self, vectors: Mapping[str, tuple[float, float]]) -> None:
+        self._names = list(vectors)
+
+    def encode_batch(self, texts: Sequence[str]) -> list[_FixedEncoding]:
+        return [
+            _FixedEncoding(
+                ids=[self._names.index(text)], attention_mask=[1], type_ids=[0]
+            )
+            for text in texts
+        ]
+
+
+class _FixedVectorSession:
+    """An inference-session double: ``run`` hands back exactly the vector
+    ``_FixedVectorTokenizer`` encoded as each text's single token id, so the
+    pair fed through :class:`EmbeddingScorer` embeds to a value this test
+    chose, not one a real graph computed."""
+
+    def __init__(self, vectors: Mapping[str, tuple[float, float]]) -> None:
+        self._vectors = [vectors[name] for name in vectors]
+
+    def run(
+        self, output_names: list[str] | None, input_feed: Mapping[str, object]
+    ) -> list[list[list[list[float]]]]:
+        del output_names
+        rows = cast(list[list[int]], input_feed["input_ids"])
+        hidden = [[list(self._vectors[row[0]])] for row in rows]
+        return [hidden]
+
+
+def _fixed_embedding_scorer(
+    vectors: Mapping[str, tuple[float, float]],
+) -> EmbeddingScorer:
+    return EmbeddingScorer(
+        name="embed-fp32",
+        session=_FixedVectorSession(vectors),
+        tokenizer=_FixedVectorTokenizer(vectors),
+    )
+
+
+def test_swapping_in_the_embedding_arm_changes_which_pairs_match_and_nothing_else() -> (
+    None
+):
+    """Issue #60's third bullet, for the arm it names specifically:
+    "substituting this arm for a classical one changes only which pairs
+    match — asserted by test." The prior test above pins the same invariant
+    for the two classical arms; this one threads the real
+    :class:`joinless.embedding.EmbeddingScorer` — RFC-0001's ``embed-fp32``
+    arm — through :func:`resolve` instead, so the invariant is exercised for
+    the arm the bullet is actually about, not only for the two arms that
+    never needed a lazy-import boundary or an on-disk artefact in the first
+    place.
+    """
+    exact_left = _record("left", 0, "Acme Traders", latitude=0.0, longitude=0.0)
+    exact_right = _record("right", 0, "Acme Traders", latitude=0.0, longitude=0.0)
+    # Semantic alias: two names sharing zero tokens (RFC-0002's evaluation-set
+    # table names this family "yes" - expected to separate the arms). Overlap's
+    # intersection is provably empty, so it always scores 0.0
+    # (test_swapping_the_scorer_changes_which_pairs_match_and_nothing_else's own
+    # reasoning, applied to the same shape of pair). The fixture's fake
+    # embedding assigns both names the same vector, so embed-fp32 scores this
+    # pair 1.0 - the behaviour a semantic-alias pair is built to demonstrate.
+    alias_left = _record("left", 1, "Rocket Fuel Traders", latitude=5.0, longitude=5.0)
+    alias_right = _record(
+        "right", 1, "Zephyr Logistics Group", latitude=5.0, longitude=5.0
+    )
+    # No scorer ever sees this one: it has no coordinates, so it can never
+    # enter a candidate set (FR-3) regardless of which scorer is in use.
+    untouchable_left = _record("left", 2, "No Coordinates Co")
+
+    vectors = {
+        "Acme Traders": (1.0, 0.0),
+        "Rocket Fuel Traders": (1.0, 0.0),
+        "Zephyr Logistics Group": (1.0, 0.0),
+        "No Coordinates Co": (0.0, 1.0),
+    }
+
+    left = [exact_left, alias_left, untouchable_left]
+    right = [exact_right, alias_right]
+    threshold = 0.9
+
+    overlap_result = resolve(
+        left,
+        right,
+        ThresholdMatcher(scorer=OverlapScorer(), threshold=threshold),
+        cell_size=1.0,
+    )
+    embedding_result = resolve(
+        left,
+        right,
+        ThresholdMatcher(scorer=_fixed_embedding_scorer(vectors), threshold=threshold),
+        cell_size=1.0,
+    )
+
+    assert overlap_result.occupancy == embedding_result.occupancy
+
+    exact_pair_overlap = next(p for p in overlap_result.pairs if p.left is exact_left)
+    exact_pair_embedding = next(
+        p for p in embedding_result.pairs if p.left is exact_left
+    )
+    assert exact_pair_overlap.right is exact_pair_embedding.right is exact_right
+    assert exact_pair_overlap.merged == exact_pair_embedding.merged
+
+    assert not any(p.left is alias_left for p in overlap_result.pairs)
+    assert any(p.left is alias_left for p in embedding_result.pairs)
+
+    untouchable_overlap = next(
+        u for u in overlap_result.unmatched if u.record is untouchable_left
+    )
+    untouchable_embedding = next(
+        u for u in embedding_result.unmatched if u.record is untouchable_left
+    )
+    assert (
+        untouchable_overlap.reason
+        == untouchable_embedding.reason
+        == _REASON_NO_COORDINATES
     )
 
 

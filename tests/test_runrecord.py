@@ -70,7 +70,7 @@ def _ok_report() -> EvaluationReport:
     aggregate = AggregateResult(
         precision=metric, recall=metric, f1=metric, derivation="pooled"
     )
-    return EvaluationReport(per_family=(family,), aggregate=aggregate)
+    return EvaluationReport(per_family=(family,), aggregate=aggregate, n_pairs=1)
 
 
 def test_a_present_maybe_carries_no_reason() -> None:
@@ -95,6 +95,24 @@ def test_a_maybe_cannot_omit_both_a_value_and_a_reason() -> None:
         Maybe(value=None, reason=None)
 
 
+def test_model_identity_carries_the_model_cards_licence_alongside_its_identity() -> (
+    None
+):
+    """Issue #59: "the model card's licence is recorded alongside the artefact
+    identity" - a fourth field on the same type that already carries
+    ``model_id``/``revision``/``checksum_sha256``, not a second place a reader
+    has to look to find it."""
+    from joinless.runrecord import ModelIdentity
+
+    identity = ModelIdentity(
+        model_id="sentence-transformers/all-MiniLM-L6-v2",
+        revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        checksum_sha256="e3fe9a9a8c877bd5ca0deebb6303aba138acc6818440211377afaca1ba78b511",
+        license="apache-2.0",
+    )
+    assert identity.license == "apache-2.0"
+
+
 # --- RunAssembly: expectations before any report (ADR-0011 rule 4, issue #50) -------
 
 from joinless.measurement import Unavailable
@@ -110,6 +128,9 @@ def _arm_result() -> ArmResult:
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
+        artifact_size=Metric(
+            value=None, undefined_reason="classical arms carry no model artifact"
+        ),
     )
 
 
@@ -164,7 +185,9 @@ def test_a_built_record_carries_the_contradictions_it_was_given() -> None:
     assembly = RunAssembly(expected_winners=expected)
     assembly.add_arm("overlap", _arm_result())
     contradiction = Contradiction(
-        family="character noise", expected_winner="fuzzy", actual_winner="overlap"
+        family="character noise",
+        expected_winner="fuzzy",
+        actual_winners=("overlap",),
     )
 
     record = assembly.build(
@@ -265,6 +288,7 @@ def test_record_to_dict_tags_an_invalid_accuracy_report_with_its_status() -> Non
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
+        artifact_size=_unavailable("overlap"),
     )
     record = _record_with(invalid_result)
 
@@ -290,6 +314,68 @@ def test_record_to_dict_tags_an_unavailable_measurement_with_its_status() -> Non
     }
 
 
+def test_record_to_dict_renders_a_classical_arms_artifact_size_as_an_explicit_undefined_metric() -> (
+    None
+):
+    """Issue #63: "arms with no model artifact record that explicitly rather
+    than as an absence" - the field is present with a reason, not missing."""
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    artifact_size = payload["results"]["overlap"]["artifact_size"]
+    assert artifact_size == {
+        "value": None,
+        "undefined_reason": "classical arms carry no model artifact",
+    }
+
+
+def test_record_to_dict_renders_a_defined_artifact_size_metric_with_no_status_wrapper() -> (
+    None
+):
+    """Unlike ``warm_latency``/``peak_memory``/``cold_start``, a defined
+    ``artifact_size`` is a bare :class:`~joinless.evaluation.Metric`, not one
+    of :func:`~joinless.runrecord._OK_TAGGED_TYPES` - it renders exactly like
+    ``Metric`` renders everywhere else it is nested (e.g. inside an accuracy
+    report's ``precision``), with no ``status`` key added."""
+    result = ArmResult(
+        accuracy=_ok_report(),
+        warm_latency=_unavailable("embed-fp32"),
+        peak_memory=_unavailable("embed-fp32"),
+        cold_start=_unavailable("embed-fp32"),
+        artifact_size=Metric(value=94000000.0, undefined_reason=None),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    assert payload["results"]["overlap"]["artifact_size"] == {
+        "value": 94000000.0,
+        "undefined_reason": None,
+    }
+
+
+def test_record_to_dict_tags_an_unavailable_artifact_size_with_its_status() -> None:
+    from joinless.evaluation import InvalidRun
+
+    result = ArmResult(
+        accuracy=InvalidRun(reason="'embed-int8' is not a known scorer"),
+        warm_latency=_unavailable("embed-int8"),
+        peak_memory=_unavailable("embed-int8"),
+        cold_start=_unavailable("embed-int8"),
+        artifact_size=_unavailable("embed-int8"),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    assert payload["results"]["overlap"]["artifact_size"] == {
+        "status": "unavailable",
+        "arm": "embed-int8",
+        "reason": "not measured in this test",
+    }
+
+
 def test_record_to_dict_renders_a_frozenset_as_a_sorted_list() -> None:
     from joinless.measurement import ColdStartPhases
 
@@ -311,6 +397,7 @@ def test_record_to_dict_renders_a_frozenset_as_a_sorted_list() -> None:
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=cold_start,
+        artifact_size=_unavailable("overlap"),
     )
     record = _record_with(result)
 
@@ -346,7 +433,9 @@ def test_record_to_dict_renders_a_contradiction_with_its_family_and_both_winners
     assembly = RunAssembly(expected_winners=expected)
     assembly.add_arm("overlap", _arm_result())
     contradiction = Contradiction(
-        family="character noise", expected_winner="fuzzy", actual_winner="overlap"
+        family="character noise",
+        expected_winner="fuzzy",
+        actual_winners=("overlap",),
     )
     record = assembly.build(
         schema="benchmark-v1",
@@ -364,7 +453,7 @@ def test_record_to_dict_renders_a_contradiction_with_its_family_and_both_winners
         {
             "family": "character noise",
             "expected_winner": "fuzzy",
-            "actual_winner": "overlap",
+            "actual_winners": ["overlap"],
         }
     ]
 
@@ -443,6 +532,7 @@ def test_write_record_never_overwrites_an_existing_record(tmp_path: Path) -> Non
             warm_latency=_unavailable("a different arm entirely"),
             peak_memory=_unavailable("overlap"),
             cold_start=_unavailable("overlap"),
+            artifact_size=_unavailable("overlap"),
         )
     )
 

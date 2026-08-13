@@ -434,8 +434,9 @@ def test_as_record_carries_exactly_the_rfc_0005_fields() -> None:
 
 def test_scramble_word_returns_a_word_unchanged_when_it_has_no_letters() -> None:
     """No base name below contains a word with zero letters, but the function's
-    type does not rule one out, and it used to raise (ValueError: Sample larger
-    than population) rather than returning the word unchanged."""
+    type does not rule one out. A letterless word gives ``random.sample`` an
+    empty population to draw from, which raises rather than returning anything,
+    so the unchanged-word path has to be chosen deliberately and pinned here."""
     assert _scramble_word(random.Random(0), "24/7") == "24/7"
 
 

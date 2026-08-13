@@ -3,22 +3,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
+import types
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from joinless import embedding
 from joinless.scoring import (
     FuzzyScorer,
     OverlapScorer,
     Scorer,
     ScorerUnavailable,
     ThresholdMatcher,
+    get_artifact_paths,
     get_scorer,
 )
 
@@ -329,10 +334,9 @@ def test_get_scorer_selects_the_fuzzy_arm_by_name() -> None:
 
 
 def test_get_scorer_rejects_a_genuinely_unknown_name_and_lists_the_known_ones() -> None:
-    """'nonesuch' names nothing this module ever defines - unlike an arm
-    ADR-0008 names but this module does not yet implement (embed-fp32),
-    which must eventually raise :class:`ScorerUnavailable` rather than this
-    unknown-name error, once that arm exists elsewhere to be probed for."""
+    """'nonesuch' names nothing this module ever defines - unlike ``embed-fp32``,
+    which is registered (below) and raises :class:`ScorerUnavailable` instead,
+    carrying a reason, when it cannot initialise."""
     with pytest.raises(ValueError, match="Unknown scorer") as excinfo:
         get_scorer("nonesuch")
 
@@ -340,6 +344,65 @@ def test_get_scorer_rejects_a_genuinely_unknown_name_and_lists_the_known_ones() 
     assert "nonesuch" in message
     assert "overlap" in message
     assert "fuzzy" in message
+
+
+def test_get_artifact_paths_is_empty_for_overlap() -> None:
+    """Overlap carries no model artefact (ADR-0003), so its size on disk is
+    explicitly ``()``, not merely absent from a mapping (issue #63)."""
+    assert get_artifact_paths("overlap") == ()
+
+
+def test_get_artifact_paths_is_empty_for_fuzzy() -> None:
+    assert get_artifact_paths("fuzzy") == ()
+
+
+def test_get_artifact_paths_names_the_fp32_model_and_tokenizer_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", "/some/cache")
+
+    paths = get_artifact_paths("embed-fp32")
+
+    assert paths == (
+        Path("/some/cache/fp32/model.onnx"),
+        Path("/some/cache/fp32/tokenizer.json"),
+    )
+
+
+def test_get_artifact_paths_rejects_a_genuinely_unknown_name() -> None:
+    with pytest.raises(ValueError, match="Unknown scorer"):
+        get_artifact_paths("nonesuch")
+
+
+_ARTIFACT_PATHS_CLASSICAL_ONLY_PROBE = """
+import sys
+from joinless.scoring import get_artifact_paths
+assert get_artifact_paths("overlap") == ()
+assert get_artifact_paths("fuzzy") == ()
+offenders = sorted(m for m in sys.modules if m == "joinless.embedding")
+sys.exit(1 if offenders else 0)
+"""
+
+
+def test_asking_for_a_classical_arms_artifact_paths_never_reaches_the_embedding_module() -> (
+    None
+):
+    """Mirrors :mod:`joinless.scoring`'s module-docstring invariant, "a
+    classical-only run never reaches joinless.embedding", applied to
+    :func:`get_artifact_paths` (issue #63): the empty-tuple case for
+    ``overlap``/``fuzzy`` must be a literal, not a call into the embedding
+    module that happens to return nothing."""
+    result = subprocess.run(
+        [sys.executable, "-c", _ARTIFACT_PATHS_CLASSICAL_ONLY_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        "asking for a classical arm's artifact paths imported joinless.embedding: "
+        f"{result.stdout.strip() or result.stderr.strip()}"
+    )
 
 
 def test_get_scorer_reports_a_missing_dependency_as_unavailable_with_a_reason(
@@ -369,6 +432,152 @@ def test_get_scorer_selects_overlap_even_when_rapidfuzz_is_unavailable(
     scorer = get_scorer("overlap")
     prepared = scorer.prepare("Acme Traders")
     assert scorer.score(prepared, prepared) == 1.0
+
+
+def test_get_scorer_reports_embed_fp32_unavailable_when_onnxruntime_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors ``test_get_scorer_reports_a_missing_dependency_as_unavailable_with_a_reason``
+    for the fp32 embedding arm: the registry's own probe (``_embed_fp32_probe``)
+    forwards :func:`joinless.embedding.probe_fp32`'s reason without altering it."""
+    monkeypatch.setitem(sys.modules, "onnxruntime", None)
+
+    with pytest.raises(ScorerUnavailable) as excinfo:
+        get_scorer("embed-fp32")
+
+    assert excinfo.value.scorer_name == "embed-fp32"
+    assert "onnxruntime" in excinfo.value.reason
+
+
+def test_get_scorer_reports_embed_fp32_unavailable_without_a_configured_cache_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with both dependencies present, requesting the fp32 arm on a machine
+    that has not run setup fails closed (ADR-0013) - via the same registry seam
+    every other arm goes through, not a special case in ``get_scorer`` itself."""
+    monkeypatch.setitem(sys.modules, "onnxruntime", types.ModuleType("onnxruntime"))
+    monkeypatch.setitem(sys.modules, "tokenizers", types.ModuleType("tokenizers"))
+    monkeypatch.delenv("JOINLESS_MODEL_CACHE_DIR", raising=False)
+
+    with pytest.raises(ScorerUnavailable) as excinfo:
+        get_scorer("embed-fp32")
+
+    assert excinfo.value.scorer_name == "embed-fp32"
+    assert "JOINLESS_MODEL_CACHE_DIR" in excinfo.value.reason
+
+
+def _fake_onnxruntime_and_tokenizers_modules() -> tuple[
+    types.ModuleType, types.ModuleType
+]:
+    """A fake ``onnxruntime``/``tokenizers`` pair minimal enough to let
+    ``embedding.load_fp32_scorer`` run to completion and produce a scorer that can
+    actually be asked to prepare and score - not just construct without raising."""
+
+    class _FakeEncoding:
+        def __init__(self, text: str) -> None:
+            self.ids = [len(text) + 1]
+            self.attention_mask = [1]
+            self.type_ids = [0]
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            pass
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            pass
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [_FakeEncoding(text) for text in texts]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            return _FakeTokenizer()
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            pass
+
+        def run(
+            self, output_names: list[str] | None, input_feed: dict[str, list[list[int]]]
+        ) -> list[list[list[list[float]]]]:
+            rows = input_feed["input_ids"]
+            return [[[[1.0, 0.0] for _ in row] for row in rows]]
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    return fake_onnxruntime, fake_tokenizers
+
+
+def test_get_scorer_selects_the_embed_fp32_arm_through_the_full_registry_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registration wiring itself (``_embed_fp32_probe``/``_embed_fp32_factory``),
+    not ``joinless.embedding``'s own functions called directly: proves ``get_scorer``
+    reaches a real, working :class:`~joinless.embedding.EmbeddingScorer` for
+    ``"embed-fp32"`` exactly as it does for ``"overlap"`` and ``"fuzzy"`` above."""
+    fake_onnxruntime, fake_tokenizers = _fake_onnxruntime_and_tokenizers_modules()
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+    fp32_dir = tmp_path / "fp32"
+    fp32_dir.mkdir(parents=True)
+    model_bytes = b"a fake fp32 graph"
+    tokenizer_bytes = b"a fake tokenizer config"
+    (fp32_dir / "model.onnx").write_bytes(model_bytes)
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_MODEL_SHA256", hashlib.sha256(model_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(tmp_path))
+
+    scorer = get_scorer("embed-fp32")
+
+    assert scorer.name == "embed-fp32"
+    prepared = scorer.prepare("Acme Traders")
+    assert scorer.score(prepared, prepared) == 1.0
+
+
+_EMBED_FP32_LAZY_IMPORT_PROBE = """
+import sys
+sys.modules["onnxruntime"] = None
+sys.modules["tokenizers"] = None
+from joinless.scoring import ScorerUnavailable, get_scorer
+try:
+    get_scorer("embed-fp32")
+except ScorerUnavailable as exc:
+    assert exc.scorer_name == "embed-fp32"
+    assert "onnxruntime" in exc.reason
+else:
+    raise AssertionError("expected ScorerUnavailable")
+"""
+
+
+def test_importing_scoring_never_imports_the_embedding_module_or_its_dependencies() -> (
+    None
+):
+    """Mirrors ``test_importing_scoring_and_scoring_with_overlap_needs_only_the_standard_library``
+    for the neural arm: blocking ``onnxruntime`` and ``tokenizers`` *before*
+    ``joinless.scoring`` is ever imported, then merely importing it and requesting
+    ``"embed-fp32"``, is the only way to observe that neither dependency is reachable
+    from module import alone - patching ``sys.modules`` in this already-running
+    process (as the tests above do) proves nothing about that."""
+    result = subprocess.run(
+        [sys.executable, "-c", _EMBED_FP32_LAZY_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        "requesting the fp32 embedding arm did not fail the way expected: "
+        f"{result.stdout.strip() or result.stderr.strip()}"
+    )
 
 
 _OVERLAP_ONLY_PROBE = """

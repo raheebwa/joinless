@@ -612,7 +612,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v1"
+    assert record["schema"] == "benchmark-v2"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -650,7 +650,7 @@ def test_benchmark_records_an_unregistered_arm_as_unavailable_with_a_reason(
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
     for arm in ("embed-fp32", "embed-int8"):
-        for field in ("warm_latency", "peak_memory", "cold_start"):
+        for field in ("warm_latency", "peak_memory", "cold_start", "artifact_size"):
             entry = record["results"][arm][field]
             assert entry["status"] == "unavailable"
             assert arm in entry["reason"]
@@ -683,6 +683,25 @@ def test_benchmark_records_a_real_measured_result_for_a_registered_arm(
     assert cold_start["session_creation"]["value"] is None
 
 
+def test_benchmark_records_the_classical_arms_artifact_size_as_an_explicit_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #63: "the classical arms are not exempt... a zero or an empty
+    cell for the classical arms is a fact worth stating explicitly" - both
+    classical arms get a defined ``artifact_size`` entry naming why there is
+    no figure, not an omitted field and not ``0.0`` (which would claim a
+    zero-byte artefact exists rather than none at all)."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    for arm in ("overlap", "fuzzy"):
+        artifact_size = record["results"][arm]["artifact_size"]
+        assert "status" not in artifact_size
+        assert artifact_size == {
+            "value": None,
+            "undefined_reason": "classical arms carry no model artifact",
+        }
+
+
 def test_benchmark_records_the_environment_the_readme_requires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -703,6 +722,123 @@ def test_benchmark_records_the_environment_the_readme_requires(
     assert environment["warmup_count"] == 5
     assert environment["repetition_count"] == 20
     assert environment["power_mode"] in {"ac", "battery", "unknown"}
+
+
+def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_arm_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run in which ``embed-fp32`` initialises must record the runtime version
+    and the model identity it actually loaded (ADR-0002, issue #59). The
+    inapplicable-with-a-reason form is correct only for a run where no neural arm
+    ran, and stating it for a run where one did would make the record assert
+    something untrue of itself.
+
+    This test is the only one that reaches that path. The fixture the other
+    benchmark tests rely on never sets ``JOINLESS_MODEL_CACHE_DIR``, so
+    ``embed-fp32`` genuinely fails there and its absence is honestly reported;
+    only a run where the arm succeeds can distinguish the two. It uses a
+    fake ``onnxruntime``/``tokenizers`` pair standing in for the 90 MB production
+    artefact (ADR-0016 rule 2: awkward enough to prove the pooling arithmetic
+    runs — see ``tests/test_embedding.py``'s own such fakes — not a claim about
+    matching the real graph's output).
+    """
+    import hashlib
+    import types
+    from collections.abc import Mapping, Sequence
+    from typing import cast
+
+    from joinless import corpus as corpus_module
+    from joinless import embedding
+    from joinless.cli import main
+
+    class _FakeEncoding:
+        def __init__(
+            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
+        ) -> None:
+            self.ids = ids
+            self.attention_mask = attention_mask
+            self.type_ids = type_ids
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            del pad_token, pad_id
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            del max_length
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [
+                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
+            ]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            del path
+            return _FakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+
+        def run(
+            self, output_names: list[str] | None, input_feed: Mapping[str, object]
+        ) -> list[object]:
+            del output_names
+            rows = cast(list[list[int]], input_feed["input_ids"])
+            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
+            return [hidden]
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+    cache_dir = tmp_path / "cache"
+    fp32_dir = cache_dir / "fp32"
+    fp32_dir.mkdir(parents=True)
+    model_bytes = b"a fake fp32 graph"
+    tokenizer_bytes = b"a fake tokenizer config"
+    (fp32_dir / "model.onnx").write_bytes(model_bytes)
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_MODEL_SHA256", hashlib.sha256(model_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+    assert exit_code == 0
+
+    written = list((tmp_path / "benchmarks").glob("*.json"))
+    record = json.loads(written[0].read_text(encoding="utf-8"))
+
+    environment = record["environment"]
+    assert environment["model"] == {
+        "value": {
+            "model_id": embedding.MODEL_ID,
+            "revision": embedding.MODEL_REVISION,
+            "checksum_sha256": embedding.FP32_MODEL_SHA256,
+            "license": embedding.MODEL_LICENSE,
+        },
+        "reason": None,
+    }
+    assert environment["runtime_versions"]["onnxruntime"] == {
+        "value": "9.9.9-fake",
+        "reason": None,
+    }
+
+    accuracy = record["results"]["embed-fp32"]["accuracy"]
+    assert accuracy["status"] == "ok"
 
 
 # --- benchmark: environment fields are pinned to their real source, not a range
@@ -864,7 +1000,7 @@ def _report_with_f1(f1_value: float) -> EvaluationReport:
         f1=winning_metric,
         derivation="pooled",
     )
-    return EvaluationReport(per_family=(family,), aggregate=aggregate)
+    return EvaluationReport(per_family=(family,), aggregate=aggregate, n_pairs=1)
 
 
 def _result_with_accuracy(
@@ -876,6 +1012,7 @@ def _result_with_accuracy(
         warm_latency=unavailable,
         peak_memory=unavailable,
         cold_start=unavailable,
+        artifact_size=unavailable,
     )
 
 
@@ -893,7 +1030,7 @@ def test_find_contradictions_reports_a_family_whose_actual_winner_differs() -> N
     assert len(contradictions) == 1
     assert contradictions[0].family == "exact"
     assert contradictions[0].expected_winner == "fuzzy"
-    assert contradictions[0].actual_winner == "overlap"
+    assert contradictions[0].actual_winners == ("overlap",)
 
 
 def test_find_contradictions_is_empty_when_the_expectation_holds() -> None:
@@ -942,7 +1079,7 @@ def test_format_contradictions_names_the_family_and_both_winners() -> None:
     lines = _format_contradictions(
         (
             Contradiction(
-                family="exact", expected_winner="fuzzy", actual_winner="overlap"
+                family="exact", expected_winner="fuzzy", actual_winners=("overlap",)
             ),
         )
     )
@@ -950,6 +1087,25 @@ def test_format_contradictions_names_the_family_and_both_winners() -> None:
     assert lines[0] == "contradictions: 1 pre-registered expectation(s) did not hold"
     assert "exact" in lines[1]
     assert "fuzzy" in lines[1]
+    assert "overlap" in lines[1]
+
+
+def test_format_contradictions_names_every_tied_actual_winner() -> None:
+    """A tie at the top is printed as the tie it is - every arm that reached
+    the top score, not just one of them."""
+    from joinless.cli import _format_contradictions
+
+    lines = _format_contradictions(
+        (
+            Contradiction(
+                family="transliteration",
+                expected_winner="fuzzy",
+                actual_winners=("embed-fp32", "overlap"),
+            ),
+        )
+    )
+
+    assert "embed-fp32" in lines[1]
     assert "overlap" in lines[1]
 
 
@@ -966,7 +1122,9 @@ def test_benchmark_persists_the_same_contradictions_it_prints(
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
     monkeypatch.chdir(tmp_path)
     forced = (
-        Contradiction(family="exact", expected_winner="fuzzy", actual_winner="overlap"),
+        Contradiction(
+            family="exact", expected_winner="fuzzy", actual_winners=("overlap",)
+        ),
     )
     monkeypatch.setattr(cli_module, "_find_contradictions", lambda *a, **k: forced)
 
@@ -981,7 +1139,7 @@ def test_benchmark_persists_the_same_contradictions_it_prints(
     written = list((tmp_path / "benchmarks").glob("*.json"))
     record = json.loads(written[0].read_text(encoding="utf-8"))
     assert record["contradictions"] == [
-        {"family": "exact", "expected_winner": "fuzzy", "actual_winner": "overlap"}
+        {"family": "exact", "expected_winner": "fuzzy", "actual_winners": ["overlap"]}
     ]
 
 

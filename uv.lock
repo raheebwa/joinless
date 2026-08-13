@@ -623,6 +623,7 @@ export = [
 neural = [
     { name = "onnx" },
     { name = "onnxruntime" },
+    { name = "tokenizers" },
 ]
 
 [package.metadata]
@@ -638,6 +639,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "rapidfuzz", specifier = ">=3.10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16" },
+    { name = "tokenizers", marker = "extra == 'neural'", specifier = ">=0.20" },
     { name = "torch", marker = "extra == 'export'", specifier = ">=2.4" },
     { name = "transformers", marker = "extra == 'export'", specifier = ">=4.44" },
 ]
