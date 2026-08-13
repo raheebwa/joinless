@@ -105,13 +105,13 @@ afford the model and never think about it. On a client device the trade is real.
 
 ## Status
 
-The classical baseline is built: the `overlap` and `fuzzy` arms run end to end behind
-the `resolve`, `compare` and `doctor` commands, at an enforced 100% line and branch
-coverage floor. The evaluation harness that will score precision, recall and F1 per arm
-is still being built, so no accuracy figures exist yet — and the `embed-fp32` and
-`embed-int8` arms are not implemented. Results land in [`benchmarks/`](benchmarks/) as
-they are produced, with the exact hardware and runtime versions recorded alongside every
-run.
+All four arms — `overlap`, `fuzzy`, `embed-fp32`, `embed-int8` — run end to end behind
+the `resolve`, `compare`, `doctor` and `benchmark` commands, at an enforced 100% line and
+branch coverage floor. `benchmark` runs RFC-0002's protocol over the built-in synthetic
+corpus and writes one record per run to [`benchmarks/`](benchmarks/): per-family
+precision, recall and F1, the four resource measurements, and the int8 arm's per-family
+accuracy divergence from fp32, with the exact hardware and runtime versions recorded
+alongside every run.
 
 ## Target platform
 

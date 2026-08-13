@@ -14,9 +14,15 @@ Every record carries:
 - Thread count, warm-up count, repetitions, power mode
 - The exact command that produced it
 - Per-arm results, per perturbation family
+- The int8 arm's per-family accuracy divergence from the fp32 arm, where both ran
 
 **Every number published in the README traces to a record here.** A figure that cannot be
 traced to a run in this directory does not belong in the README.
 
 Records are never edited after the fact. A run that produced a surprising or unflattering
 result stays exactly as recorded; a later run is a new record, not an overwrite.
+
+The quantized-operator list is read from the int8 graph itself at run time, not carried
+over from the spike record — and if a run's graph does not match the operator census that
+graph is recorded to have, the run writes no record at all rather than one row quietly
+marked unavailable while the rest reads as if nothing were wrong.
