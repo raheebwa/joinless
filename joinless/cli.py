@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: MIT
 """The ``joinless`` console entry point: ``resolve``, ``compare``, ``doctor``,
-``benchmark``.
+``benchmark``, ``report``.
 
-RFC-0003 names five commands; four exist at this point in the project (M2).
-``report`` is later work and deliberately absent here and from ``--help`` — this
-module's job is to name only the commands that actually exist, not to reserve a
-place for ones that don't yet.
+RFC-0003 names exactly these five commands, and all five now exist.
+
+**``report`` renders a record; it never re-measures** (issue #46, RFC-0003:
+"`report` never measures. A renderer that can compute a missing figure will
+eventually be asked to."). :func:`_cmd_report` reads one already-written JSON
+record from disk — the only I/O it performs — and hands it, unmodified, to
+:func:`joinless.report.render_per_family_table`. That module owns the table
+itself (issue #71); this function's whole job is the file read and the print.
+There is no flag on the ``report`` subparser beyond the record's own path, no
+environment variable this command reads, and no code path by which a value
+supplied any other way could reach the rendered table — the per-family
+figures printed are only ever the ones already sitting in ``results.<arm>.
+accuracy.pooled.per_family`` on the record a caller named.
 
 **The record-set schema for ``resolve``.** Neither the PRD nor RFC-0003 fixes a file
 format for the two record sets FR-1 asks to be merged — that is a different object
@@ -126,6 +135,11 @@ from joinless.measurement import (
     measure_warm_latency,
 )
 from joinless.records import Record
+from joinless.report import (
+    RENDERABLE_SCHEMA,
+    UnsupportedSchema,
+    render_per_family_table,
+)
 from joinless.resolver import (
     DEFAULT_CELL_SIZE_DEGREES,
     PreparationPath,
@@ -383,7 +397,13 @@ _REPETITION_COUNT = 20
 # `results.<arm>.warm_latency` already used. This branch makes exactly one
 # transition from the last published schema no matter how many shapes it passes
 # through before that transition is published.
-_SCHEMA = "benchmark-v5"
+#
+# v5 -> v6: `results.<arm>.accuracy.pooled.per_family[]` (and each seed's own
+# report in `by_seed`) gained `false_positives` (issue #105) - a plain count,
+# never a ratio, so it is defined on every family including the two the corpus
+# builds with no actual positives at all, where recall and F1 stay `null`
+# (ADR-0013) no matter what the arm predicts.
+_SCHEMA = RENDERABLE_SCHEMA
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and
@@ -1238,11 +1258,45 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- report --------------------------------------------------------------------
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Read ``args.record`` and print its per-family results table (issue #46).
+
+    The only I/O this function performs: opening and JSON-decoding the one
+    file its one positional argument names. Everything after that is a call
+    to :func:`joinless.report.render_per_family_table`, a pure function of
+    the parsed record — no scorer is constructed, no corpus is generated, no
+    measurement worker is spawned, and there is no second argument through
+    which a figure could be supplied instead of read from the record.
+    """
+    try:
+        with args.record.open(encoding="utf-8") as handle:
+            record = json.load(handle)
+    except OSError as exc:
+        print(f"could not read {args.record}: {exc}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"{args.record} is not a valid JSON run record: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        rendered = render_per_family_table(record)
+    except UnsupportedSchema as exc:
+        print(f"cannot render {args.record}: {exc}", file=sys.stderr)
+        return 1
+
+    print(rendered, end="")
+    return 0
+
+
 _COMMANDS: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "resolve": _cmd_resolve,
     "compare": _cmd_compare,
     "doctor": _cmd_doctor,
     "benchmark": _cmd_benchmark,
+    "report": _cmd_report,
 }
 
 
@@ -1328,6 +1382,20 @@ def build_parser() -> argparse.ArgumentParser:
             "that cannot initialise is recorded as unavailable with a reason, "
             "never omitted. No flags: the corpus and the arms are fixed."
         ),
+    )
+
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Render a run record's per-family results table.",
+        description=(
+            "Read one JSON run record written by `joinless benchmark` and "
+            "print its per-family results table. Renders only — performs no "
+            "measurement, initialises no arm, and has no argument through "
+            "which a figure could be supplied other than the record itself."
+        ),
+    )
+    report_parser.add_argument(
+        "record", type=Path, help="Path to a benchmarks/*.json run record."
     )
 
     return parser

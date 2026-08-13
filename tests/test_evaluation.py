@@ -143,6 +143,72 @@ def test_undefined_precision_and_recall_are_reported_as_null_never_zero() -> Non
     assert report.per_family[0].precision.value != 0.0
 
 
+# --- false positive count: defined where F1 is not (issue #105) --------------------
+
+
+def test_false_positive_count_is_defined_on_an_all_negative_family_where_f1_is_null() -> (
+    None
+):
+    """``near-miss negative`` carries no actual positives, so recall and F1 stay
+    ``null`` (ADR-0013) no matter what the arm predicts. False positive count is a
+    plain count, not a ratio, so it has no empty-denominator case at all and is
+    always defined — this is the figure that tells `overlap` falling for the trap
+    apart from `embed-fp32` not falling for it, where the two currently render as
+    the same ``null``."""
+    from joinless.evaluation import evaluate
+
+    pairs = [
+        _pair("1", "Acme Traders", "Zeta Motors", 0, "near-miss negative"),
+        _pair("2", "Acme Traders", "Rofl Retailers", 0, "near-miss negative"),
+    ]
+    matcher = ThresholdMatcher(scorer=OverlapScorer(), threshold=0.0)  # matches all
+
+    report = evaluate(pairs, matcher)
+
+    family = report.per_family[0]
+    assert family.recall.value is None  # still null - no actual positives
+    assert family.f1.value is None  # still null - inherits recall's undefined-ness
+    assert family.false_positives == 2
+
+
+def test_false_positive_count_is_zero_when_the_arm_predicts_nothing() -> None:
+    """The mirror case: an arm that falls for nothing on the same trap. Precision
+    is also ``null`` here (no predicted positives), but false positive count is
+    still defined, and it is ``0`` - a real, distinct fact from ``null``."""
+    from joinless.evaluation import evaluate
+
+    pairs = [_pair("1", "Acme Traders", "Zeta Motors", 0, "near-miss negative")]
+    matcher = ThresholdMatcher(scorer=OverlapScorer(), threshold=0.99)
+
+    report = evaluate(pairs, matcher)
+
+    family = report.per_family[0]
+    assert family.precision.value is None  # null - no predicted positives
+    assert family.false_positives == 0
+
+
+def test_false_positive_count_uses_the_same_formula_on_a_positive_family() -> None:
+    """Bullet 2's constraint: the same computation, not a branch that only runs
+    for the two negative families. Applied to an all-positive family, it is
+    provably ``0`` under this formula - a predicted positive in a family where
+    every label is ``1`` is, by definition, a true positive - which is the
+    identical-procedure property producing a trivial answer, not a special case
+    skipping the family."""
+    from joinless.evaluation import evaluate
+
+    pairs = [
+        _pair("1", "Acme Traders", "Acme Traders", 1, "exact"),
+        _pair("2", "Zeta Motors", "Zeta Motors", 1, "exact"),
+    ]
+    matcher = ThresholdMatcher(scorer=OverlapScorer(), threshold=0.5)
+
+    report = evaluate(pairs, matcher)
+
+    family = report.per_family[0]
+    assert family.precision.value == 1.0
+    assert family.false_positives == 0
+
+
 def test_evaluate_rejects_an_empty_split() -> None:
     from joinless.evaluation import evaluate
 
@@ -219,6 +285,7 @@ def test_aggregate_is_built_from_the_per_family_table_not_raw_pairs() -> None:
         true_positives=10,
         predicted_positives=10,
         actual_positives=10,
+        false_positives=0,
     )
 
     aggregate = _aggregate([family])
@@ -549,6 +616,7 @@ def _report_with_f1(family: str, value: float):  # type: ignore[no-untyped-def]
         true_positives=1,
         predicted_positives=1,
         actual_positives=1,
+        false_positives=0,
     )
     aggregate = AggregateResult(
         precision=row.precision,
@@ -617,6 +685,7 @@ def test_find_contradictions_names_every_family_that_contradicts_the_expectation
                     true_positives=1,
                     predicted_positives=1,
                     actual_positives=1,
+                    false_positives=0,
                 ),
             ),
             aggregate=reports["overlap"].aggregate,
@@ -633,6 +702,7 @@ def test_find_contradictions_names_every_family_that_contradicts_the_expectation
                     true_positives=1,
                     predicted_positives=1,
                     actual_positives=1,
+                    false_positives=0,
                 ),
             ),
             aggregate=reports["fuzzy"].aggregate,
@@ -820,6 +890,7 @@ def test_find_contradictions_skips_a_family_where_the_expected_arm_has_no_compar
         true_positives=0,
         predicted_positives=0,
         actual_positives=1,
+        false_positives=0,
     )
     reports = {
         "overlap": _report_with_f1("abbreviation", 0.5),
@@ -860,6 +931,7 @@ def _multi_family_report(families: dict[str, float | None]):  # type: ignore[no-
                     true_positives=0,
                     predicted_positives=0,
                     actual_positives=1,
+                    false_positives=0,
                 )
             )
         else:
@@ -873,6 +945,7 @@ def _multi_family_report(families: dict[str, float | None]):  # type: ignore[no-
                     true_positives=1,
                     predicted_positives=1,
                     actual_positives=1,
+                    false_positives=0,
                 )
             )
     aggregate = AggregateResult(

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: MIT
-"""The console entry point: ``resolve``, ``compare``, ``doctor``, ``benchmark``.
+"""The console entry point: ``resolve``, ``compare``, ``doctor``, ``benchmark``,
+``report``.
 
-``report`` (issue #46) does not exist yet, and this suite guards that as a fact
-about the CLI, not an accident of what nobody got round to adding — a word that
-would be a subcommand name in a later version must still be rejected as an
-unrecognized argument today.
+RFC-0003's optional read-only viewer (issue #46's own RFC, "Alternatives
+considered") is not a subcommand of this CLI at all, and this suite guards that
+as a fact about the CLI, not an accident of what nobody got round to adding —
+a word that would be a subcommand name in a later version must still be
+rejected as an unrecognized argument today.
 """
 
 from __future__ import annotations
@@ -124,11 +126,12 @@ def test_help_names_only_the_commands_that_exist(
     assert "compare" in out
     assert "doctor" in out
     assert "benchmark" in out
-    # report is #46, not built yet - --help must not imply it exists.
-    assert "report" not in out
+    assert "report" in out
+    # the optional viewer (RFC-0003) is not a subcommand of this CLI.
+    assert "viewer" not in out
 
 
-@pytest.mark.parametrize("word", ["report"])
+@pytest.mark.parametrize("word", ["viewer"])
 def test_a_not_yet_built_command_is_rejected_as_unrecognized(word: str) -> None:
     from joinless.cli import main
 
@@ -712,7 +715,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v5"
+    assert record["schema"] == "benchmark-v6"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -1529,6 +1532,7 @@ def _report_with_f1(f1_value: float) -> EvaluationReport:
         true_positives=1,
         predicted_positives=1,
         actual_positives=1,
+        false_positives=0,
     )
     aggregate = AggregateResult(
         precision=other_metric,
@@ -2294,10 +2298,526 @@ sys.exit(cli.main({argv!r}))
 
 def test_the_schema_tag_names_one_transition_from_the_last_published_version() -> None:
     """The persisted shape changed several times across this branch's work, but
-    only ``benchmark-v4`` was ever written into a record anyone can hold. A tag
-    that counted intermediate, uncommitted steps would imply versions that never
-    existed to read.
+    only ``benchmark-v5`` was ever published. A tag that counted intermediate,
+    uncommitted steps would imply versions that never existed to read.
     """
     from joinless.cli import _SCHEMA
 
-    assert _SCHEMA == "benchmark-v5"
+    assert _SCHEMA == "benchmark-v6"
+
+
+# --- report (issue #46): renders a record, never re-measures -----------------
+
+
+def _report_fixture_record() -> dict[str, Any]:
+    """A full, hand-assembled ``RunRecord``, serialised the one way this
+    project ever serialises one (:func:`joinless.runrecord.record_to_dict`) —
+    three arms (one with a defined family, an undefined one, and an
+    unavailable arm carrying a reason), one contradiction, and an aggregate
+    per arm, so the ``report`` tests below exercise the same JSON shape
+    ``joinless benchmark`` actually writes rather than a shape invented only
+    for this test file.
+    """
+    from datetime import UTC, datetime
+
+    from joinless.evaluation import (
+        AggregateResult,
+        Contradiction,
+        EvaluationReport,
+        ExpectedWinners,
+        FamilyResult,
+        InvalidRun,
+        Metric,
+        SealedTestAccuracy,
+        compute_family_variation,
+    )
+    from joinless.measurement import Unavailable
+    from joinless.runrecord import (
+        ArmResult,
+        BucketOccupancy,
+        Environment,
+        EvaluationSetIdentity,
+        Hardware,
+        Maybe,
+        PreparationAsymmetry,
+        RunAssembly,
+        RuntimeVersions,
+        record_to_dict,
+    )
+
+    exact_metric = Metric(value=1.0, undefined_reason=None)
+    derivation = (
+        "sum true positives, predicted positives and actual positives across "
+        "every family in the per-family table, then compute precision, recall "
+        "and F1 from those pooled counts"
+    )
+
+    def _report(
+        family_rows: tuple[FamilyResult, ...],
+        *,
+        precision: float,
+        recall: float,
+        f1: float,
+    ) -> EvaluationReport:
+        aggregate = AggregateResult(
+            precision=Metric(value=precision, undefined_reason=None),
+            recall=Metric(value=recall, undefined_reason=None),
+            f1=Metric(value=f1, undefined_reason=None),
+            derivation=derivation,
+        )
+        return EvaluationReport(per_family=family_rows, aggregate=aggregate, n_pairs=32)
+
+    def _accuracy(report: EvaluationReport) -> SealedTestAccuracy:
+        by_seed = {7: report}
+        return SealedTestAccuracy(
+            pooled=report,
+            pooled_answers="what the pooled figure answers",
+            by_seed=by_seed,
+            variation=compute_family_variation(by_seed),
+            by_seed_answers="what the per-seed figures answer",
+        )
+
+    overlap_report = _report(
+        (
+            FamilyResult(
+                family="exact",
+                precision=exact_metric,
+                recall=exact_metric,
+                f1=exact_metric,
+                true_positives=16,
+                predicted_positives=16,
+                actual_positives=16,
+                false_positives=0,
+            ),
+            FamilyResult(
+                family="near-miss negative",
+                precision=Metric(value=0.0, undefined_reason=None),
+                recall=Metric(value=None, undefined_reason="no actual positives"),
+                f1=Metric(
+                    value=None,
+                    undefined_reason="recall is undefined: no actual positives",
+                ),
+                true_positives=0,
+                predicted_positives=115,
+                actual_positives=0,
+                false_positives=115,
+            ),
+        ),
+        precision=0.635,
+        recall=0.833,
+        f1=0.721,
+    )
+    embed_report = _report(
+        (
+            FamilyResult(
+                family="exact",
+                precision=exact_metric,
+                recall=exact_metric,
+                f1=exact_metric,
+                true_positives=16,
+                predicted_positives=16,
+                actual_positives=16,
+                false_positives=0,
+            ),
+            FamilyResult(
+                family="near-miss negative",
+                precision=Metric(value=None, undefined_reason="no predicted positives"),
+                recall=Metric(value=None, undefined_reason="no actual positives"),
+                f1=Metric(
+                    value=None,
+                    undefined_reason="precision is undefined: no predicted positives",
+                ),
+                true_positives=0,
+                predicted_positives=0,
+                actual_positives=0,
+                false_positives=0,
+            ),
+        ),
+        precision=0.9123,
+        recall=0.8317,
+        f1=0.871,
+    )
+
+    expected = ExpectedWinners(
+        winners={"exact": "overlap", "near-miss negative": "embed-fp32"}
+    )
+    assembly = RunAssembly(expected_winners=expected)
+
+    def _unavailable_arm_result(arm: str, reason: str) -> ArmResult:
+        return ArmResult(
+            accuracy=InvalidRun(reason=reason),
+            warm_latency=Unavailable(arm=arm, reason=reason),
+            peak_memory=Unavailable(arm=arm, reason=reason),
+            cold_start=Unavailable(arm=arm, reason=reason),
+            artifact_size=Unavailable(arm=arm, reason=reason),
+            preparation=Unavailable(arm=arm, reason=reason),
+            preparation_cost=Unavailable(arm=arm, reason=reason),
+        )
+
+    def _ok_arm_result(arm: str, report: EvaluationReport) -> ArmResult:
+        reason = "not measured in this fixture"
+        return ArmResult(
+            accuracy=_accuracy(report),
+            warm_latency=Unavailable(arm=arm, reason=reason),
+            peak_memory=Unavailable(arm=arm, reason=reason),
+            cold_start=Unavailable(arm=arm, reason=reason),
+            artifact_size=Unavailable(arm=arm, reason=reason),
+            preparation=Unavailable(arm=arm, reason=reason),
+            preparation_cost=Unavailable(arm=arm, reason=reason),
+        )
+
+    assembly.add_arm("overlap", _ok_arm_result("overlap", overlap_report))
+    assembly.add_arm("embed-fp32", _ok_arm_result("embed-fp32", embed_report))
+    assembly.add_arm(
+        "fuzzy", _unavailable_arm_result("fuzzy", "rapidfuzz is not installed")
+    )
+
+    contradiction = Contradiction(
+        family="near-miss negative",
+        expected_winner="embed-fp32",
+        actual_winners=("overlap",),
+    )
+
+    environment = Environment(
+        hardware=Hardware(
+            cpu_count=8,
+            machine="arm64",
+            python_version="3.14.5",
+            release="25.5.0",
+            system="Darwin",
+            total_memory_bytes=1,
+        ),
+        runtime_versions=RuntimeVersions(
+            onnxruntime=Maybe(value="1.28.0", reason=None), rapidfuzz="3.10.0"
+        ),
+        power_mode="ac",
+        thread_count=1,
+        warmup_count=5,
+        repetition_count=20,
+        models={},
+        quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+        measurement_preparation_path="hoisted",
+    )
+    evaluation_set = EvaluationSetIdentity(
+        seeds=(7,), case_mixture={"exact": 16, "near-miss negative": 48}
+    )
+    preparation_asymmetry = PreparationAsymmetry(
+        occupancy=BucketOccupancy(counts=(1,), cell_size_degrees=0.01, max_occupancy=1),
+        classical_speedups={},
+        neural_speedups={},
+    )
+
+    record = assembly.build(
+        schema="benchmark-v6",
+        started_at=datetime(2026, 8, 13, 12, 0, 0, tzinfo=UTC),
+        command=("joinless", "benchmark"),
+        environment=environment,
+        evaluation_set=evaluation_set,
+        selected_thresholds=(),
+        contradictions=(contradiction,),
+        int8_accuracy_divergence=Maybe(
+            value=None, reason="not computed in this fixture"
+        ),
+        preparation_asymmetry=preparation_asymmetry,
+    )
+    return record_to_dict(record)
+
+
+def _write_report_fixture(tmp_path: Path) -> Path:
+    path = tmp_path / "record.json"
+    path.write_text(json.dumps(_report_fixture_record()), encoding="utf-8")
+    return path
+
+
+def test_report_reads_a_record_and_prints_its_per_family_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    exit_code = main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "family: exact" in out
+    assert "family: near-miss negative" in out
+    assert "overlap" in out
+    assert "embed-fp32" in out
+
+
+def test_report_keeps_the_unavailable_arms_row_carrying_its_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    assert "fuzzy" in out
+    assert "rapidfuzz is not installed" in out
+
+
+def test_report_renders_undefined_metrics_as_null_with_their_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    assert "null (no actual positives)" in out
+    assert "null (no predicted positives)" in out
+    # never coerced to 0 or left blank - the false positive count is the one
+    # figure that still distinguishes the two arms on this family (issue #105)
+    assert "115" in out
+
+
+def test_report_marks_the_contradicted_family(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    family_block = out.split("family: near-miss negative", 1)[1]
+    heading_line = family_block.splitlines()[0]
+    assert "CONTRADICTED" in heading_line
+    assert "embed-fp32" in heading_line
+    assert "overlap" in heading_line
+    exact_block = out.split("family: exact", 1)[1]
+    exact_heading = exact_block.splitlines()[0]
+    assert "CONTRADICTED" not in exact_heading
+
+
+def test_report_labels_the_aggregate_as_derived_from_the_per_family_figures(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    assert "derived" in out
+    assert "0.635" in out
+    assert "0.833" in out
+    assert "0.721" in out
+    assert "0.871" in out
+
+
+def test_report_output_does_not_depend_on_any_environment_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Done-when: 'no environment variable... can override a metric.' Running
+    the same record with and without ``JOINLESS_MODEL_CACHE_DIR`` set — the one
+    environment variable this project's own arms read — must print byte-identical
+    output."""
+    from joinless.cli import main
+
+    path = _write_report_fixture(tmp_path)
+
+    monkeypatch.delenv("JOINLESS_MODEL_CACHE_DIR", raising=False)
+    main(["report", str(path)])
+    without_env = capsys.readouterr().out
+
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(tmp_path))
+    main(["report", str(path)])
+    with_env = capsys.readouterr().out
+
+    assert without_env == with_env
+
+
+def test_report_rejects_an_unreadable_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    exit_code = main(["report", str(tmp_path / "does-not-exist.json")])
+
+    assert exit_code == 1
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_report_rejects_a_file_that_is_not_valid_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless.cli import main
+
+    path = tmp_path / "not-json.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    exit_code = main(["report", str(path)])
+
+    assert exit_code == 1
+    assert "not a valid JSON run record" in capsys.readouterr().err
+
+
+def test_report_parser_has_no_flag_beyond_the_record_path() -> None:
+    """Done-when: 'no flag... can override a metric.' Proved structurally —
+    the ``report`` subparser's only arguments are ``-h``/``--help`` and the
+    one positional naming the record to render."""
+    import argparse
+
+    from joinless.cli import build_parser
+
+    parser = build_parser()
+    subparsers_action = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    report_parser = subparsers_action.choices["report"]
+
+    option_strings = {
+        option for action in report_parser._actions for option in action.option_strings
+    }
+    assert option_strings == {"-h", "--help"}
+
+    positional_dests = [
+        action.dest for action in report_parser._actions if not action.option_strings
+    ]
+    assert positional_dests == ["record"]
+
+
+def _numeric_leaves(value: object) -> list[float]:
+    """Every ``int``/``float`` reachable inside ``value`` (a JSON-shaped
+    record), flattened — the comparison set for
+    :func:`test_every_number_rendered_by_report_appears_in_the_source_record`.
+    Compared by parsed value, not by exact text: ``report`` formats a figure
+    to three decimal places (``1.0`` becomes ``"1.000"``), and that
+    presentation choice is not the drift this test guards against — a
+    rendered number the record does not carry, anywhere, at all, is.
+    ``bool`` is excluded: it is a subtype of ``int`` in Python, and no field
+    on any record type is boolean, so admitting it would only risk a
+    coincidental match.
+    """
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, dict):
+        return [n for v in value.values() for n in _numeric_leaves(v)]
+    if isinstance(value, list):
+        return [n for v in value for n in _numeric_leaves(v)]
+    return []
+
+
+def test_every_number_rendered_by_report_appears_in_the_source_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Done-when: 'a test asserts that every number in rendered output appears
+    in the source record.' Every figure ``report`` printed is checked against
+    the record's own values - the record :func:`main` was actually given, not
+    a value this test remembers separately."""
+    import re
+
+    from joinless.cli import main
+
+    record = _report_fixture_record()
+    path = tmp_path / "record.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+    main(["report", str(path)])
+
+    out = capsys.readouterr().out
+    printed = re.findall(r"\b\d+(?:\.\d+)?\b", out)
+    assert printed, "report printed nothing - nothing to check"
+    # rounded to 3 places: `report` itself formats every Metric to three
+    # decimal places (`_format_metric`), so a record figure with more
+    # precision than that is expected to appear rounded, never bit-for-bit.
+    record_numbers = {round(n, 3) for n in _numeric_leaves(record)}
+    for text in printed:
+        assert round(float(text), 3) in record_numbers, (
+            f"report printed {text!r}, which does not match any number in "
+            "the source record"
+        )
+
+
+_REPORT_IMPORT_PROBE_TEMPLATE = """
+import sys
+from joinless.cli import main
+
+main(["report", {record_path!r}])
+_offending_prefixes = ("onnxruntime", "tokenizers", "rapidfuzz", "joinless.embedding")
+offenders = sorted(
+    m for m in sys.modules
+    if m in _offending_prefixes
+    or m.startswith(tuple(p + "." for p in _offending_prefixes))
+)
+print("\\n".join(offenders))
+sys.exit(1 if offenders else 0)
+"""
+
+
+def test_report_never_initialises_the_runtime_or_any_scorer(tmp_path: Path) -> None:
+    """Done-when: 'it performs no measurement and initialises no arm.'
+
+    A child interpreter, and that is load-bearing (mirrors
+    ``test_running_doctor_never_initialises_the_runtime`` above and
+    ``tests/test_import_boundary.py``'s own reasoning): ``sys.modules`` is
+    global to a process, so an in-process assertion says only that nothing in
+    the whole session imported these — it would pass or fail on test ordering,
+    not on a property of this command. The fixture record names both neural
+    arms and the classical ``fuzzy`` arm, so a ``report`` run that *did*
+    construct a scorer to check its work, or re-measure anything, would pull
+    in the runtime, the tokenizer, or ``rapidfuzz`` — none of which this
+    command has any reason to import at all.
+    """
+    path = _write_report_fixture(tmp_path)
+    probe = _REPORT_IMPORT_PROBE_TEMPLATE.format(record_path=str(path))
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, (
+        "running report pulled in scorer or runtime machinery it never needed: "
+        f"{result.stdout.strip() or result.stderr.strip()}"
+    )
+
+
+def test_report_completes_with_no_network_interface_available(tmp_path: Path) -> None:
+    path = _write_report_fixture(tmp_path)
+    argv = ["report", str(path)]
+    result = subprocess.run(
+        [sys.executable, "-c", _no_network_probe(argv)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_report_refuses_a_record_from_an_older_schema_without_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three of the four records committed to ``benchmarks/`` predate per-seed
+    accuracy (#97) and cannot be rendered by this build. Feeding one to the
+    command used to raise ``KeyError: 'pooled'`` out of the renderer's internals
+    and print a stack trace. The refusal belongs on stderr with both schema
+    names in it, and the exit status has to say the command did not do its job.
+    """
+    from joinless.cli import main
+
+    record = tmp_path / "old.json"
+    record.write_text(
+        json.dumps({"schema": "benchmark-v4", "results": {}}), encoding="utf-8"
+    )
+
+    exit_code = main(["report", str(record)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "benchmark-v4" in captured.err
+    assert "benchmark-v6" in captured.err
