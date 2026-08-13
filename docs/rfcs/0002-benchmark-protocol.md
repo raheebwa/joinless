@@ -1,6 +1,6 @@
 # RFC-0002 — Benchmark protocol
 
-**Status:** Draft · **Date:** 2026-08-12 · **Implements:** PRD MR-1 … MR-12 · **Bound by:** ADR-0011, ADR-0013, ADR-0014
+**Status:** Draft · **Date:** 2026-08-12 · **Implements:** PRD MR-1 … MR-12 · **Bound by:** ADR-0010, ADR-0011, ADR-0013, ADR-0014
 
 ## Summary
 
@@ -12,6 +12,11 @@ can be reproduced by a reader on their own machine.
 The project's entire contribution is a comparison. A comparison is worth exactly as much
 as its methodology. Loose measurement — one run, no warm-up, mean latency, an evaluation
 set of easy cases — would produce numbers that look authoritative and are worthless.
+
+The same failure mode does not stop at measurement. A report that can drift from the
+record it claims to summarise, or a single ranked winner that silently weighs accuracy
+against memory against latency on the reader's behalf, both produce something that looks
+authoritative for reasons that have nothing to do with whether it is true.
 
 ## Design
 
@@ -136,6 +141,43 @@ Each run writes a durable record to `benchmarks/` containing environment, evalua
 set identity, per-arm metrics, and the exact command. The README results table is
 generated from those records — never hand-written.
 
+**`report` is a pure function of the run record.** It re-renders whatever a run already
+wrote; it never re-measures, and there is no argument, flag, or edit point by which a
+metric can be supplied to it by hand. This is what turns `benchmarks/README.md`'s claim
+that "every number published traces to a record here" from an aspiration into an
+enforceable property: without the rule, a hand-typed figure and a measured one are
+indistinguishable once both are on the page, and the entire reason for writing a durable
+record is to make that distinction checkable. With the rule, a number in a report that
+does not trace to a record is a defect with a one-line description — which record it was
+supposed to come from, and why it is not there — rather than something a reader has to
+take on faith.
+
+### Decision output
+
+The four arms are measured on several dimensions that do not share a unit — accuracy,
+warm latency, resident memory, artifact size. Collapsing those into one ranked winner
+means choosing an exchange rate between an F1 point and a megabyte of resident memory,
+and any rate this project picked would encode this project's priorities, not the
+reader's. A mobile client bound by peak RSS and a batch job bound by artifact size can
+rank the same four arms in opposite orders, and both orderings are correct for the
+constraint that produced them.
+
+**The decision output is therefore the Pareto frontier under constraints the reader
+states** — a memory ceiling, a latency ceiling, an accuracy floor, any combination of
+these — never a generic winner row. An arm sits on the frontier if no other arm beats it
+on every stated dimension at once; everything not on the frontier is dominated by
+something that costs no more on any axis and can be dropped without loss. **"No arm
+qualifies" is a valid result** for a constraint set nothing measured here satisfies, and
+it is more useful than a winner produced by quietly relaxing the constraint the reader
+actually stated — it reports the true state of the evidence instead of a comforting
+approximation of it.
+
+This is the same boundary ADR-0010 draws for the project's claims generally: what the
+evidence supports is a statement of the form *given the model is more accurate, what does
+it cost on the reference machine, and does a regime exist where the cheaper arm is still
+the right call* — not a single figure that resolves that trade-off on the reader's
+behalf.
+
 ## Open questions
 
 1. How many repeats before the p99 stabilises on this workload?
@@ -155,3 +197,11 @@ question.
 **Use an existing entity-resolution benchmark suite.** Better external validity, but
 those suites are built on real corpora, which ADR-0004 rules out, and they measure whole
 systems rather than the single matcher swap isolated here.
+
+**Emit a single winner row.** Requires assigning weights across accuracy, latency,
+memory and artifact size on the reader's behalf and not disclosing that a choice was
+made in doing so — the same failure ADR-0010 names for claims about this project more
+generally. A row computed under one weighting is wrong for a reader operating under a
+different one, and the record does not say which weighting produced it. The frontier
+reports what is actually known — which arms are and are not dominated — and leaves the
+weighting to whoever has the constraint.
