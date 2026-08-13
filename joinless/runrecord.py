@@ -40,10 +40,10 @@ from joinless.corpus import Corpus
 from joinless.evaluation import (
     AccuracyDivergence,
     Contradiction,
-    EvaluationReport,
     ExpectedWinners,
     InvalidRun,
     Metric,
+    SealedTestAccuracy,
     SelectedThreshold,
 )
 from joinless.measurement import (
@@ -367,6 +367,15 @@ class ArmResult:
     :class:`~joinless.measurement.Unavailable` for a measurement — never
     omitted and never coerced into a number.
 
+    ``accuracy`` is typed :class:`~joinless.evaluation.SealedTestAccuracy`,
+    not a bare :class:`~joinless.evaluation.EvaluationReport` (issue #97):
+    the pooled per-family figure travels with the per-seed reports and the
+    seed-to-seed variation behind it, and :class:`SealedTestAccuracy`'s own
+    construction refuses a pooled figure reported without that variation
+    (ADR-0011 rule 3) — a run whose threshold selection was itself
+    contaminated still reports :class:`~joinless.evaluation.InvalidRun`
+    here, exactly as before.
+
     ``artifact_size`` is typed :class:`~joinless.evaluation.Metric`, not one
     of the three dedicated measurement dataclasses its siblings use: unlike
     peak memory or cold start, this figure carries no extra fields beyond a
@@ -400,7 +409,7 @@ class ArmResult:
     supersedes the other.
     """
 
-    accuracy: EvaluationReport | InvalidRun
+    accuracy: SealedTestAccuracy | InvalidRun
     warm_latency: WarmLatency | Unavailable
     peak_memory: PeakMemory | Unavailable
     cold_start: ColdStartPhases | Unavailable
@@ -605,7 +614,7 @@ _FAILURE_STATUS_BY_TYPE: dict[type, str] = {
     Unavailable: "unavailable",
 }
 _OK_TAGGED_TYPES: tuple[type, ...] = (
-    EvaluationReport,
+    SealedTestAccuracy,
     WarmLatency,
     PeakMemory,
     ColdStartPhases,

@@ -16,6 +16,7 @@ record be checked by recomputing it rather than trusted.
 
 from __future__ import annotations
 
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -431,6 +432,215 @@ def evaluate_sealed_test(
 
     matcher = ThresholdMatcher(scorer=scorer, threshold=frozen.value)
     return evaluate(sealed_test_pairs, matcher)
+
+
+# Issue #97 / ADR-0011 rule 3: "results are reported per perturbation family...
+# the corpus is generated under several deterministic seeds and variation across
+# seeds is reported." A single defined value has no spread to report — the same
+# "undefined propagates, never collapses to a number" rule ADR-0013 states for a
+# ratio applies here to a spread: reporting ``0.0`` for one seed would claim a
+# stability nothing measured.
+_MIN_SEEDS_FOR_VARIATION = 2
+
+
+def _variation_metric(values: Sequence[Metric], metric_name: str) -> Metric:
+    """The sample standard deviation of ``values``'s defined figures, or
+    undefined naming how many of ``values`` actually had one — the shared
+    arithmetic behind every field on :class:`FamilyVariation`, so precision,
+    recall and F1 can never disagree about what "not enough seeds" means."""
+    defined = [value.value for value in values if value.value is not None]
+    if len(defined) < _MIN_SEEDS_FOR_VARIATION:
+        return Metric(
+            value=None,
+            undefined_reason=(
+                f"only {len(defined)} of {len(values)} seed(s) produced a "
+                f"defined {metric_name} for this family"
+            ),
+        )
+    return Metric(value=statistics.stdev(defined), undefined_reason=None)
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyVariation:
+    """Seed-to-seed spread of one family's precision, recall and F1
+    (ADR-0011 rule 3, issue #97) — the sample standard deviation across
+    whichever of :func:`compute_family_variation`'s seeds produced a defined
+    value for that metric and family, never estimated and never a second
+    measurement: pure arithmetic over the per-seed
+    :class:`EvaluationReport` values a caller already has, mirroring how
+    :class:`AggregateResult` is derived from :class:`FamilyResult` rows
+    rather than computed independently of them.
+    """
+
+    family: str
+    precision: Metric
+    recall: Metric
+    f1: Metric
+
+
+def compute_family_variation(
+    by_seed: Mapping[int, EvaluationReport],
+) -> tuple[FamilyVariation, ...]:
+    """One :class:`FamilyVariation` per family in ``by_seed``'s reports, in
+    the lowest-numbered seed's own family order (ADR-0011 rule 3, issue
+    #97) — the figure that lets a reader see whether a pooled per-family
+    result depends on one draw, without computing it from ``by_seed`` by
+    hand.
+
+    Every corpus :func:`joinless.corpus.generate_corpus` builds carries the
+    same eight families in the same order (that module's docstring), so in
+    the one call path this module ships — every entry in ``by_seed`` coming
+    from :func:`evaluate_sealed_test_with_variation` — the reports already
+    agree. This function still checks rather than assumes it: two reports
+    naming different families is a caller error (an evaluation set that
+    changed shape between seeds is not something a spread figure can paper
+    over), so it raises rather than silently comparing family "exact" in one
+    seed against family "exact" in another as if they meant the same
+    evaluation.
+    """
+    if not by_seed:
+        raise ValueError("compute_family_variation requires at least one seed's report")
+
+    ordered_seeds = sorted(by_seed)
+    reference_families = tuple(
+        row.family for row in by_seed[ordered_seeds[0]].per_family
+    )
+    rows_by_seed = {
+        seed: {row.family: row for row in report.per_family}
+        for seed, report in by_seed.items()
+    }
+    for seed in ordered_seeds:
+        families = set(rows_by_seed[seed])
+        if families != set(reference_families):
+            raise ValueError(
+                f"seed {seed}'s report families {sorted(families)} do not "
+                f"match seed {ordered_seeds[0]}'s {sorted(reference_families)}"
+            )
+
+    variations = []
+    for family in reference_families:
+        rows = [rows_by_seed[seed][family] for seed in ordered_seeds]
+        variations.append(
+            FamilyVariation(
+                family=family,
+                precision=_variation_metric(
+                    [row.precision for row in rows], "precision"
+                ),
+                recall=_variation_metric([row.recall for row in rows], "recall"),
+                f1=_variation_metric([row.f1 for row in rows], "F1"),
+            )
+        )
+    return tuple(variations)
+
+
+# Issue #97's third bullet: pooling and per-seed reporting answer different
+# questions, and the record states which one each number answers — named once
+# here, exactly as `_SELECTION_PROCEDURE` and `_AGGREGATE_DERIVATION` above are
+# each named once, so the run record and this module's own reasoning about it
+# cannot drift apart.
+_POOLED_ACCURACY_ANSWERS = (
+    "what this arm scores across every seed's sealed-test pairs, pooled into "
+    "one split and scored together under the one threshold ADR-0011 rule 2 "
+    "selects from pooled calibration data — the reported headline RFC-0002's "
+    "splits table calls the sealed test's result"
+)
+_BY_SEED_ACCURACY_ANSWERS = (
+    "what this arm scores on each seed's own sealed-test split alone, under "
+    "that identical threshold and procedure — whether the pooled figure "
+    "above depends on one draw or holds across the corpus's several "
+    "deterministic seeds (ADR-0011 rule 3)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTestAccuracy:
+    """One arm's sealed-test accuracy, structured so a pooled figure can
+    never be read without the seed-to-seed variation that explains what it
+    hides (ADR-0011 rule 3, issue #97).
+
+    ``pooled`` and ``by_seed``/``variation`` answer different questions —
+    ``pooled_answers`` and ``by_seed_answers`` say which, in the record
+    itself, not only in this docstring (issue #97's third bullet: "the
+    record should say which one each number answers"). Both are pooled and
+    per-seed evaluations of the exact same sealed-test pairs under the exact
+    same frozen threshold (:func:`evaluate_sealed_test_with_variation`) —
+    ADR-0011 rule 2's "identical procedure" holds seed to seed here, the
+    same way it already holds arm to arm, or the variation reported would be
+    an artefact of the procedure rather than of the draw.
+
+    ``variation`` is *derived* from ``by_seed`` — mirroring
+    :attr:`AggregateResult.derivation` — never computed independently of it,
+    and :meth:`__post_init__` makes that a structural fact rather than a
+    convention a caller has to remember: a ``SealedTestAccuracy`` naming a
+    pooled family with no corresponding row in ``variation`` cannot be
+    constructed at all.
+    """
+
+    pooled: EvaluationReport
+    pooled_answers: str
+    by_seed: Mapping[int, EvaluationReport]
+    variation: tuple[FamilyVariation, ...]
+    by_seed_answers: str
+
+    def __post_init__(self) -> None:
+        if not self.by_seed:
+            raise ValueError("SealedTestAccuracy requires at least one seed's report")
+        pooled_families = {row.family for row in self.pooled.per_family}
+        variation_families = {row.family for row in self.variation}
+        if variation_families != pooled_families:
+            raise ValueError(
+                "a pooled accuracy figure must never be reported without the "
+                "seed-to-seed variation behind it (issue #97): variation must "
+                "cover exactly the pooled report's families (missing "
+                f"{sorted(pooled_families - variation_families)}, extra "
+                f"{sorted(variation_families - pooled_families)})"
+            )
+
+
+def evaluate_sealed_test_with_variation(
+    corpora: Sequence[Corpus],
+    pooled: Corpus,
+    scorer: Scorer[Any],
+    frozen: FrozenThreshold,
+) -> SealedTestAccuracy | InvalidRun:
+    """Evaluate ``scorer``'s sealed-test accuracy both pooled across
+    ``corpora`` and per seed (ADR-0011 rule 3, issue #97), under the one
+    ``frozen`` threshold every seed and every arm shares (ADR-0011 rule 2).
+
+    ``pooled`` is evaluated first, and its outcome decides the whole call:
+    if the threshold turns out to have read the sealed test
+    (:func:`evaluate_sealed_test` returning :class:`InvalidRun`), that
+    reason is returned as-is and no per-seed evaluation runs at all — a
+    threshold the protocol has already rejected is not a threshold worth
+    scoring five more times (ADR-0013). ``pooled`` is not required to be
+    ``corpora`` pooled together by this function; it is whatever the caller
+    already built for that purpose (``joinless.cli``'s own ``_pool_corpora``,
+    used for threshold selection too), so pooling stays defined in exactly
+    one place rather than duplicated here.
+    """
+    pooled_report = evaluate_sealed_test(pooled, scorer, frozen)
+    if isinstance(pooled_report, InvalidRun):
+        return pooled_report
+
+    by_seed: dict[int, EvaluationReport] = {}
+    for one_corpus in corpora:
+        seed_report = evaluate_sealed_test(one_corpus, scorer, frozen)
+        # evaluate_sealed_test's only failure mode is `frozen.role !=
+        # "calibration"` (its own docstring) - a fact about `frozen`, not
+        # about which corpus it scores. `pooled_report` above already proved
+        # that check passes for this exact `frozen`, so every per-seed call
+        # with the same `frozen` passes it too - not a second, independent
+        # possibility this loop needs to guard against.
+        assert isinstance(seed_report, EvaluationReport)
+        by_seed[one_corpus.seed] = seed_report
+
+    return SealedTestAccuracy(
+        pooled=pooled_report,
+        pooled_answers=_POOLED_ACCURACY_ANSWERS,
+        by_seed=MappingProxyType(by_seed),
+        variation=compute_family_variation(by_seed),
+        by_seed_answers=_BY_SEED_ACCURACY_ANSWERS,
+    )
 
 
 @dataclass(frozen=True, slots=True)

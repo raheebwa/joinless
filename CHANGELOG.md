@@ -64,3 +64,15 @@ warns nobody.
   spike record, and checked against the exact census that graph is recorded to have: a
   run whose graph does not match it, on operator types or on counts, writes no record
   at all.
+- Per-family accuracy is now reported both pooled across every seed and per seed, with
+  the seed-to-seed variation (sample standard deviation of precision, recall and F1)
+  stated as a figure rather than left for a reader to compute — a pooled figure and its
+  variation are structurally inseparable in the record: the type they are recorded on
+  cannot be constructed with one and not the other.
+
+### Fixed
+
+- The preparation-cost worker now times `joinless.resolver`'s own `prepare_hoisted` and
+  `prepare_naive` functions — the same two `score_candidates` calls to score every
+  candidate pair — instead of a second, hand-written copy of both loops. The reported
+  hoist speed-ups now describe the call pattern the library actually ships.

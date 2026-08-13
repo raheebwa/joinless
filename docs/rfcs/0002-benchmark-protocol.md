@@ -61,6 +61,42 @@ No model is trained here, so this is a tuning/test split rather than a train/tes
 Tuning is where inflation enters, and it enters per arm at different magnitudes — which is
 what makes the *ranking* an artefact rather than only the absolute numbers.
 
+### Per-seed accuracy reporting
+
+The corpus is generated under several deterministic seeds (ADR-0011 rule 3), and the
+sealed test in the table above is scored two ways from that same set of seeds, because
+pooling and per-seed reporting answer different questions:
+
+| Figure | Answers |
+|---|---|
+| Pooled | what an arm scores across every seed's sealed-test pairs, combined into one split — more data, the same "reported result" the splits table above names, and the number a single ranked comparison between arms is drawn from |
+| Per-seed, with variation | whether that pooled figure depends on one seed's particular draw, or holds across every seed the corpus was generated under |
+
+**Both are kept, deliberately, rather than replacing one with the other.** A pooled-only
+report is exactly the defect this section exists to close: after pooling there is one
+number per family, so a reader cannot tell a stable result from an artefact of one draw.
+A per-seed-only report drops the pooled figure's larger sample for no reason — pooling
+does not corrupt anything ADR-0011 rule 2 requires, since every seed's sealed-test pairs
+carry that seed as part of their pair id (`joinless.corpus`), so no pair collides across
+seeds and pooling never mixes one seed's row into another's. Reporting only one of the
+two would answer only one of the two questions above and leave the other for a reader to
+reconstruct by hand from a record not shaped to hold it.
+
+The threshold itself is not re-opened by any of this. One threshold per arm, selected once
+from the pooled calibration split by the identical procedure threshold governance below
+already requires, is applied to the pooled sealed test and to every seed's own sealed test
+alike — ADR-0011 rule 2's "identical procedure" has to hold seed to seed for the same
+reason it already has to hold arm to arm: a comparison between seeds scored under
+different procedures would attribute variation to the draw that actually came from the
+scoring, not the data.
+
+The seed-to-seed spread itself is the sample standard deviation of each family's
+precision, recall and F1 across whichever seeds produced a defined value for that metric
+— undefined, not zero, with fewer than two defined values to compare (ADR-0013): a single
+seed's figure has no spread to report, and reporting `0.0` would claim a stability nothing
+measured. Every persisted pooled figure carries this variation alongside it; a run record
+cannot report one without the other (`joinless.evaluation.SealedTestAccuracy`).
+
 ### Threshold governance
 
 Each arm's threshold is selected on calibration data alone, by an identical documented
