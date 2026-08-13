@@ -635,3 +635,41 @@ def test_a_classical_arms_worker_has_not_imported_the_inference_runtime(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --- warm latency names what it times (issue #65's third bullet) --------------------
+
+
+def test_warm_latency_states_that_preparation_sits_outside_the_timed_section() -> None:
+    """Issue #65's third bullet: "the run record states which one produced each
+    figure." Warm latency's answer is that neither path produced it — the timed
+    section is ``score`` alone, with both operands prepared before it. Without
+    that on the figure, a reader comparing 24.29 µs for ``embed-fp32`` against
+    25.00 µs for ``embed-int8`` would conclude quantization bought no speed at
+    all, when what those numbers actually show is that the graph never runs
+    inside the timed section: the inference cost is in preparation, where the
+    same run records 12.06 ms against 8.25 ms.
+
+    Pinned by content, not by comparison against the constant that produces it —
+    a symbol comparison passes whatever the text says.
+    """
+    from joinless.measurement import WARM_LATENCY_SCOPE
+
+    assert WARM_LATENCY_SCOPE == (
+        "score only; both operands are prepared before the timed section, so no "
+        "preparation cost is included in this figure"
+    )
+
+
+def test_a_warm_latency_value_carries_that_scope_with_it() -> None:
+    from joinless.measurement import WARM_LATENCY_SCOPE, WarmLatency
+
+    latency = WarmLatency(
+        arm="overlap",
+        p50_seconds=1.0,
+        p99_seconds=2.0,
+        warmup_count=5,
+        repetition_count=20,
+    )
+
+    assert latency.scope == WARM_LATENCY_SCOPE

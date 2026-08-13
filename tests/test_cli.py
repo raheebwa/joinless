@@ -712,7 +712,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v5"
+    assert record["schema"] == "benchmark-v4"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -2220,3 +2220,14 @@ socket.getaddrinfo = _blocked
 from joinless import cli as cli
 sys.exit(cli.main({argv!r}))
 """
+
+
+def test_the_schema_tag_names_one_transition_from_the_last_published_version() -> None:
+    """The persisted shape changed several times across this branch's work, but
+    only ``benchmark-v3`` was ever written into a record anyone can hold. A tag
+    that counted intermediate, uncommitted steps would imply versions that never
+    existed to read.
+    """
+    from joinless.cli import _SCHEMA
+
+    assert _SCHEMA == "benchmark-v4"
