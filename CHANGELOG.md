@@ -32,3 +32,23 @@ warns nobody.
 - `joinless resolve`, `joinless compare` and `joinless doctor` on the command line.
   `doctor` reports architecture, execution provider, installed profile and offline status,
   so the Arm64, CPU-only and no-network properties are checkable rather than asserted.
+- `joinless.evaluation` — per-family precision, recall and F1 reported as defined values
+  or as null with a stated reason, never as a zero standing in for an undefined figure;
+  threshold selection on the calibration role; and pre-registered expectations, whose
+  failures are returned as first-class contradictions rather than folded into a log line.
+- `joinless.measurement` — warm latency, peak resident memory and a five-phase cold-start
+  decomposition, each measured in a fresh child interpreter so one arm's cost cannot leak
+  into another's. An arm whose artifact or runtime is absent is reported unavailable with
+  the reason, and keeps its row.
+- `joinless.runrecord` — the run record: hardware, OS, interpreter and runtime versions,
+  model identity and checksum, evaluation-set identity, and every arm's result, written
+  to a new file that is never overwritten.
+- `joinless benchmark` on the command line, writing one such record per run.
+- `joinless.embedding` — the `embed-fp32` arm: a MiniLM sentence encoder behind the same
+  `Scorer` protocol as the classical arms, with mean pooling and cosine similarity, and
+  batched preparation as part of the protocol so a per-pair caller cannot silently opt
+  out of the batching the measurement assumes.
+- `tokenizers` in the `neural` profile, loaded from a local `tokenizer.json`, so an
+  inference-only install carries no model-hub tooling.
+- Artifact size on disk recorded per arm, making the storage cost of an arm part of the
+  record rather than a figure a reader has to go and measure.
