@@ -1,0 +1,3 @@
+{"fields": {"category": "hardware", "hours": "08:00-18:00", "phone": "+000 000 000 000"}, "latitude": 0.31, "longitude": 32.58, "name": "Northbridge Hardware Ltd", "sources": ["left", "right"], "status": "matched"}
+{"fields": {}, "latitude": 0.42, "longitude": 32.61, "name": "Meridian Foods", "ordinal": 1, "reason": "no candidate record shares its nine-cell grid neighbourhood", "source": "left", "status": "unmatched"}
+{"fields": {}, "latitude": null, "longitude": null, "name": "Unrelated Traders", "ordinal": 1, "reason": "no coordinates: a record without them can never enter a candidate set (FR-3)", "source": "right", "status": "unmatched"}
