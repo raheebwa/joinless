@@ -44,14 +44,32 @@ here — reading a supplied file is issue #76, milestone M7 — so the only inpu
 test actually drew from, not only about what
 :func:`~joinless.runrecord.build_evaluation_set_identity` claims for the same run.
 ``overlap`` and ``fuzzy`` are always registered in :mod:`joinless.scoring`;
-``embed-fp32`` is registered too (M3), but only *available* where
-``JOINLESS_MODEL_CACHE_DIR`` names a directory holding its checksummed artefact
-(:mod:`joinless.embedding`) — ``embed-int8`` remains unregistered, so ``get_scorer``
-still raises ``ValueError`` for that one name, the same it raises for any other name
-it does not recognise. All four names in :data:`_ARMS` are attempted regardless: an
-unregistered name and a registered-but-unavailable one are both ADR-0013's "an arm
-that cannot initialise is recorded... not omitted," satisfied by the real cases
-rather than a stub.
+``embed-fp32`` (M3) and ``embed-int8`` (issue #67, on RFC-0004's spike record
+recording a "go") are registered too, each *available* only where
+``JOINLESS_MODEL_CACHE_DIR`` names a directory holding its own checksummed
+artefact (:mod:`joinless.embedding`) — the int8 arm's own model file, plus the
+fp32 arm's tokenizer, which the two arms share. All four names in :data:`_ARMS`
+are attempted regardless of availability: a registered-but-unavailable arm is
+ADR-0013's "an arm that cannot initialise is recorded... not omitted," and every
+arm here is checked the same way, through :func:`joinless.scoring.get_scorer`'s
+probe-then-factory order — there is no unregistered name left among them for a
+caller to hit ``ValueError`` on.
+
+**The int8 arm's matmul-conversion census is read from its graph, once, at the end
+of the arm loop** (:func:`_quantized_operators`, issue #68) — never copied from
+``benchmarks/20260812T181752Z-quantization-spike.json``, and checked against what
+that record established for this exact artefact, both which replacement operator
+types are present
+(:data:`joinless.embedding.INT8_QUANTIZED_OPERATORS`) and how many of each
+candidate operator type converted
+(:data:`joinless.embedding.INT8_MATMUL_CONVERSION`) — the counts a reader needs to
+tell a partly-quantized encoder's expected, unchanged latency apart from a defect
+(issue #68 finding 1). A graph whose live-read census does not equal either pinned
+expectation raises :class:`joinless.embedding.QuantizedOperatorMismatchError`,
+which :func:`_cmd_benchmark` lets abort the whole run rather than folding into one
+arm's ``ArmResult`` the way an ordinary checksum mismatch does (ADR-0013 rule 3):
+no record is produced for a run whose understanding of what it quantized cannot be
+trusted, not a record with one row quietly marked unavailable.
 
 Every command here is local computation over :mod:`joinless.records`,
 :mod:`joinless.resolver`, :mod:`joinless.scoring`, :mod:`joinless.corpus`,
@@ -83,11 +101,13 @@ from typing import Any
 from joinless import corpus
 from joinless.corpus import Corpus, LabelledPair, Role
 from joinless.evaluation import (
+    AccuracyDivergence,
     Contradiction,
     EvaluationReport,
     ExpectedWinners,
     InvalidRun,
     SelectedThreshold,
+    compute_accuracy_divergence,
     evaluate_sealed_test,
     find_contradictions,
     freeze_threshold,
@@ -107,6 +127,7 @@ from joinless.runrecord import (
     ArmResult,
     Environment,
     Hardware,
+    MatmulConversion,
     Maybe,
     ModelIdentity,
     RunAssembly,
@@ -284,19 +305,26 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 # --- benchmark ---------------------------------------------------------------
 
-# ADR-0008 names four arms. "overlap" and "fuzzy" are always registered;
-# "embed-fp32" is registered too (M3) but only available where
-# JOINLESS_MODEL_CACHE_DIR names a directory holding its checksummed artefact
-# (joinless.embedding); "embed-int8" remains unregistered. All four are attempted
-# regardless — see the module docstring for why an unregistered name and a
-# registered-but-unavailable one are both the real ADR-0013 "unavailable" case
-# rather than a stub.
+# ADR-0008 names four arms, all four registered in joinless.scoring: "overlap" and
+# "fuzzy" unconditionally, "embed-fp32" (M3) and "embed-int8" (issue #67) each
+# available only where JOINLESS_MODEL_CACHE_DIR names a directory holding its own
+# checksummed artefact (joinless.embedding). All four are attempted regardless —
+# see the module docstring for why a registered-but-unavailable arm is the real
+# ADR-0013 "unavailable" case rather than a stub.
 _ARMS: tuple[str, ...] = ("overlap", "fuzzy", "embed-fp32", "embed-int8")
 
 _WARMUP_COUNT = 5
 _REPETITION_COUNT = 20
 
-_SCHEMA = "benchmark-v2"
+# v2 -> v3: three breaking shape changes to a record other tooling may parse,
+# mirroring the precedent that moved v1 -> v2 when `contradictions[].actual_winner`
+# was renamed and retyped (a breaking shape change to a persisted field moves the
+# schema tag with it). Here: `environment.model` (a single nullable model identity)
+# became `environment.models` (a mapping keyed by arm name); a new top-level
+# `int8_accuracy_divergence` field was added; and `environment.quantized_operators`
+# was retyped from a flat operator-type list to a matmul-conversion census keyed by
+# candidate operator type (issue #68 finding 1).
+_SCHEMA = "benchmark-v3"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and
@@ -409,29 +437,35 @@ def _model_identity(arm: str) -> ModelIdentity | None:
 
     Imported lazily, at call time — mirroring :mod:`joinless.scoring`'s own
     lazy reach into :mod:`joinless.embedding` (ADR-0014, ADR-0017) — so a
-    classical-only run, or a run in which ``embed-fp32`` could not
+    classical-only run, or a run in which neither neural arm could
     initialise, never imports :mod:`joinless.embedding` from here either.
     """
     if arm == "embed-fp32":
         from joinless import embedding
 
         return embedding.model_identity_fp32()
+    if arm == "embed-int8":
+        from joinless import embedding
+
+        return embedding.model_identity_int8()
     return None
 
 
-def _runtime_versions(*, model_identity: ModelIdentity | None) -> RuntimeVersions:
+def _runtime_versions(*, models: Mapping[str, ModelIdentity]) -> RuntimeVersions:
     """``rapidfuzz`` is a base dependency (ADR-0014) so its version is always
     read from installed-package metadata. ``onnxruntime`` is read a different
-    way, and only when ``model_identity`` says a neural arm actually loaded
-    one: :data:`sys.modules` already holds the exact module that arm's own
-    ``get_scorer`` call imported (:mod:`joinless.embedding`'s
-    ``load_fp32_scorer``), so ``onnxruntime.__version__`` names the runtime
-    this run actually used rather than whatever a separate metadata lookup
-    happens to find on the path. A run with no successful neural arm keeps
-    the version inapplicable (ADR-0013) — never absent-and-uninteresting,
-    and never guessed at from a package that was never imported.
+    way, and only when ``models`` is non-empty — at least one neural arm
+    actually loaded one: :data:`sys.modules` already holds the exact module
+    whichever arm's own ``get_scorer`` call imported
+    (:mod:`joinless.embedding`'s ``load_fp32_scorer``/``load_int8_scorer``,
+    both of which import the same top-level ``onnxruntime`` package), so
+    ``onnxruntime.__version__`` names the runtime this run actually used
+    rather than whatever a separate metadata lookup happens to find on the
+    path. A run with no successful neural arm keeps the version inapplicable
+    (ADR-0013) — never absent-and-uninteresting, and never guessed at from a
+    package that was never imported.
     """
-    if model_identity is not None:
+    if models:
         import onnxruntime
 
         onnxruntime_version = Maybe(value=onnxruntime.__version__, reason=None)
@@ -443,16 +477,59 @@ def _runtime_versions(*, model_identity: ModelIdentity | None) -> RuntimeVersion
     )
 
 
+def _quantized_operators(
+    models: Mapping[str, ModelIdentity],
+) -> Maybe[Mapping[str, MatmulConversion]]:
+    """The int8 arm's matmul-conversion census for this run, read from its own
+    graph — or an explicit reason it does not apply (issue #68's first and second
+    bullets, finding 1: "how many of the graph's matmuls were converted and how
+    many remain in fp32", not a bare list of the operator types present).
+
+    RFC-0002 Method step 5 lists "quantized operator list" in the same clause as
+    "model identity, revision and checksum" — the fact this function reads
+    ``models`` for, keyed the same way :class:`~joinless.runrecord.Environment`
+    already keys model identity by arm. It stays a single field rather than a
+    second arm-keyed mapping: ADR-0007 fixes v1 at exactly one quantization pass,
+    so ``embed-int8`` is the only arm this can ever apply to, and a mapping with
+    one possible key would be structure this project does not need yet (YAGNI).
+
+    ``None`` with a reason when no int8 arm loaded a model in this run (ADR-0013)
+    — there is no graph to read anything from. Otherwise reads the graph fresh, at
+    call time, via :func:`joinless.embedding.verify_int8_operators` — never the
+    spike record, and never asserted from ``models``'s own checksum, which
+    :func:`joinless.embedding.probe_int8` already verified but says nothing about
+    which operators the checksummed bytes actually contain.
+
+    Raises :class:`joinless.embedding.QuantizedOperatorMismatchError` uncaught —
+    :func:`_cmd_benchmark` is the one that decides what "the graph does not match
+    its recorded operator list" means for the run as a whole (issue #68's third
+    bullet): refusing to write any record, not marking one arm unavailable while
+    the rest of the record is written as if nothing were wrong. That guard now
+    covers the matmul-conversion census too, not only which operator types are
+    present (:func:`joinless.embedding.verify_int8_operators`'s own docstring).
+
+    Imported lazily, at call time, mirroring :func:`_model_identity` — so a run
+    with no int8 arm never imports :mod:`joinless.embedding` from here either.
+    """
+    if "embed-int8" not in models:
+        return Maybe(value=None, reason="no int8 arm in this run")
+
+    from joinless import embedding
+
+    model_path, _ = embedding.resolve_int8_model_paths(os.environ)
+    _, census = embedding.verify_int8_operators(model_path)
+    return Maybe(value=census, reason=None)
+
+
 def _environment(
-    power_mode: str, *, model_identity: ModelIdentity | None
+    power_mode: str,
+    *,
+    models: Mapping[str, ModelIdentity],
+    quantized_operators: Maybe[Mapping[str, MatmulConversion]],
 ) -> Environment:
-    if model_identity is not None:
-        model = Maybe(value=model_identity, reason=None)
-    else:
-        model = Maybe(value=None, reason="no neural arm in this run")
     return Environment(
         hardware=_hardware(),
-        runtime_versions=_runtime_versions(model_identity=model_identity),
+        runtime_versions=_runtime_versions(models=models),
         power_mode=power_mode,
         # Single-threaded: no arm this module can run configures a thread pool or a
         # GPU/NPU execution provider (ADR-0006), and neither classical scorer
@@ -460,10 +537,8 @@ def _environment(
         thread_count=1,
         warmup_count=_WARMUP_COUNT,
         repetition_count=_REPETITION_COUNT,
-        model=model,
-        # embed-int8 remains unregistered (module docstring), so no run can yet
-        # produce a quantized-operator list.
-        quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+        models=models,
+        quantized_operators=quantized_operators,
     )
 
 
@@ -579,6 +654,62 @@ def _find_contradictions(
     return find_contradictions(expected, reports)
 
 
+# RFC-0001: "the fp32 and int8 arms are the same class with different model
+# artefacts" — the pair this divergence compares is exactly this pair, named
+# once here rather than re-spelled at each call site.
+_INT8_DIVERGENCE_BASELINE_ARM = "embed-fp32"
+_INT8_DIVERGENCE_CANDIDATE_ARM = "embed-int8"
+
+
+def _int8_accuracy_divergence(
+    arm_results: Mapping[str, ArmResult],
+) -> Maybe[tuple[AccuracyDivergence, ...]]:
+    """The int8 arm's per-family F1 divergence from the fp32 arm, computed
+    from this run's own two accuracy reports (issue #67's third bullet) —
+    never a second evaluation pass, and never asserted in prose: a reader who
+    wants to know whether quantization changed a family's accuracy reads it
+    off the run record itself, the same way :func:`_find_contradictions`
+    already turns two arms' reports into a comparison rather than a claim.
+
+    Requires both arms to have produced a real, comparable accuracy report in
+    *this* run — an arm missing from ``arm_results`` entirely, or one whose
+    ``accuracy`` is :class:`~joinless.evaluation.InvalidRun` (unavailable
+    dependency, missing artefact, or any other reason :func:`_measure_arm`
+    records), means there is nothing to compute a divergence from. That is
+    reported as an explicit absence with a reason (ADR-0013) — never a
+    fabricated comparison, and never an empty tuple, which would look like
+    "computed, and nothing to report" rather than "not computed at all".
+    """
+    baseline_result = arm_results.get(_INT8_DIVERGENCE_BASELINE_ARM)
+    if baseline_result is None or not isinstance(
+        baseline_result.accuracy, EvaluationReport
+    ):
+        return Maybe(
+            value=None,
+            reason=(
+                f"{_INT8_DIVERGENCE_BASELINE_ARM!r} did not produce a comparable "
+                "accuracy report in this run"
+            ),
+        )
+    candidate_result = arm_results.get(_INT8_DIVERGENCE_CANDIDATE_ARM)
+    if candidate_result is None or not isinstance(
+        candidate_result.accuracy, EvaluationReport
+    ):
+        return Maybe(
+            value=None,
+            reason=(
+                f"{_INT8_DIVERGENCE_CANDIDATE_ARM!r} did not produce a comparable "
+                "accuracy report in this run"
+            ),
+        )
+    return Maybe(
+        value=compute_accuracy_divergence(
+            baseline=baseline_result.accuracy, candidate=candidate_result.accuracy
+        ),
+        reason=None,
+    )
+
+
 def _format_contradictions(contradictions: Sequence[Contradiction]) -> list[str]:
     """The lines ``benchmark`` prints for its contradictions finding (issue
     #50: "findings... not a footnote") — a pure function of the comparison
@@ -617,11 +748,12 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     assembly = RunAssembly(expected_winners=_EXPECTED_WINNERS)
     arm_results: dict[str, ArmResult] = {}
     selected_thresholds: list[SelectedThreshold] = []
-    # At most one arm on this branch ever loads a model (embed-fp32; embed-int8
-    # remains unregistered), so "the last one that reported an identity" and
-    # "the one that did" are the same arm — this will need revisiting once a
-    # second neural arm is registered and the two could disagree.
-    model_identity: ModelIdentity | None = None
+    # One entry per neural arm that actually initialised (issue #67): both
+    # embed-fp32 and embed-int8 can load a model in the same run, each with
+    # its own checksum, so this accumulates one identity per arm rather than
+    # tracking "the last one that reported an identity" - a single slot for
+    # that would have to silently drop one of the two.
+    model_identities: dict[str, ModelIdentity] = {}
     for arm in _ARMS:
         result, selected, identity = _measure_arm(
             arm, pooled, left_name, right_name, power_mode
@@ -631,21 +763,44 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         if selected is not None:
             selected_thresholds.append(selected)
         if identity is not None:
-            model_identity = identity
+            model_identities[arm] = identity
 
     # ADR-0011 rule 4 / issue #50: the pre-registered expectations are compared
     # against the actual outcome here, once, and the same value is both printed
     # below and persisted on the record - never recomputed for either.
     contradictions = _find_contradictions(_EXPECTED_WINNERS, arm_results)
+    # issue #67's third bullet: computed once here, from this run's own two
+    # accuracy reports, and persisted rather than recomputed - the same
+    # discipline `contradictions` above already follows.
+    int8_accuracy_divergence = _int8_accuracy_divergence(arm_results)
+
+    # issue #68's third bullet: a graph that does not match its recorded
+    # operator list must not produce a record at all - caught here, before
+    # `assembly.build`/`write_record` runs, rather than folded into one arm's
+    # own ArmResult the way a checksum mismatch is (ADR-0013 rule 3). Imported
+    # lazily so a run that never reaches this branch never imports
+    # joinless.embedding from here either (ADR-0014, ADR-0017) - though every
+    # `benchmark` run already does, through embed-fp32/embed-int8's own probes
+    # in the loop above.
+    from joinless.embedding import QuantizedOperatorMismatchError
+
+    try:
+        quantized_operators = _quantized_operators(model_identities)
+    except QuantizedOperatorMismatchError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     record = assembly.build(
         schema=_SCHEMA,
         started_at=started_at,
         command=("joinless", "benchmark"),
-        environment=_environment(power_mode, model_identity=model_identity),
+        environment=_environment(
+            power_mode, models=model_identities, quantized_operators=quantized_operators
+        ),
         evaluation_set=evaluation_set,
         selected_thresholds=tuple(selected_thresholds),
         contradictions=contradictions,
+        int8_accuracy_divergence=int8_accuracy_divergence,
     )
     try:
         path = write_record(record, Path("benchmarks"))

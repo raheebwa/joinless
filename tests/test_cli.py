@@ -13,6 +13,7 @@ import json
 import platform
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -607,12 +608,43 @@ def _run_benchmark_with_small_corpus(
     return result
 
 
+def _fake_onnx_module(op_types: list[str]) -> types.ModuleType:
+    """A fake ``onnx`` module whose ``load`` returns an object exposing
+    ``graph.node`` with exactly ``op_types`` (as each node's ``.op_type``) -
+    standing in for the real ``onnx.load`` the same way the neighbouring
+    fakes stand in for ``onnxruntime``/``tokenizers`` (ADR-0016 rule 2), so
+    quantized-operator verification (issue #68) can be exercised end to end
+    without a real graph on disk.
+    """
+
+    class _FakeNode:
+        def __init__(self, op_type: str) -> None:
+            self.op_type = op_type
+
+    class _FakeGraph:
+        def __init__(self, nodes: list[str]) -> None:
+            self.node = [_FakeNode(op_type) for op_type in nodes]
+
+    class _FakeModel:
+        def __init__(self, nodes: list[str]) -> None:
+            self.graph = _FakeGraph(nodes)
+
+    module = types.ModuleType("onnx")
+
+    def _load(path: str) -> _FakeModel:
+        del path
+        return _FakeModel(op_types)
+
+    module.load = _load  # type: ignore[attr-defined]
+    return module
+
+
 def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v2"
+    assert record["schema"] == "benchmark-v3"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -633,18 +665,21 @@ def test_benchmark_prints_the_path_it_wrote(
     assert written[0].name in capsys.readouterr().out
 
 
-def test_benchmark_records_every_configured_arm_including_the_unregistered_two(
+def test_benchmark_records_every_configured_arm_including_the_two_neural_ones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Issue #45's third bullet: "an arm that cannot initialise is recorded as
     unavailable with a reason, not omitted" - all four configured arms must have
-    a row, not just the two joinless.scoring currently registers."""
+    a row. The fixture this test shares with its neighbours never sets
+    ``JOINLESS_MODEL_CACHE_DIR``, so both neural arms are registered but
+    unavailable here (issue #67) - the "not omitted" half of ADR-0013 applies
+    to that case exactly as it does to a name nothing registers at all."""
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
     assert set(record["results"]) == {"overlap", "fuzzy", "embed-fp32", "embed-int8"}
 
 
-def test_benchmark_records_an_unregistered_arm_as_unavailable_with_a_reason(
+def test_benchmark_records_an_arm_without_a_configured_cache_dir_as_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
@@ -718,6 +753,11 @@ def test_benchmark_records_the_environment_the_readme_requires(
         "value": None,
         "reason": "no neural arm in this run",
     }
+    assert environment["models"] == {}
+    assert environment["quantized_operators"] == {
+        "value": None,
+        "reason": "no int8 arm in this run",
+    }
     assert environment["thread_count"] == 1
     assert environment["warmup_count"] == 5
     assert environment["repetition_count"] == 20
@@ -733,11 +773,14 @@ def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_ar
     ran, and stating it for a run where one did would make the record assert
     something untrue of itself.
 
-    This test is the only one that reaches that path. The fixture the other
-    benchmark tests rely on never sets ``JOINLESS_MODEL_CACHE_DIR``, so
-    ``embed-fp32`` genuinely fails there and its absence is honestly reported;
-    only a run where the arm succeeds can distinguish the two. It uses a
-    fake ``onnxruntime``/``tokenizers`` pair standing in for the 90 MB production
+    The fixture the other benchmark tests rely on never sets
+    ``JOINLESS_MODEL_CACHE_DIR``, so ``embed-fp32`` genuinely fails there and
+    its absence is honestly reported; only a run where the arm succeeds can
+    distinguish the two. Only ``embed-fp32``'s artefact is configured here —
+    ``embed-int8`` still fails, so ``environment["models"]`` carries one entry;
+    ``test_benchmark_records_both_neural_arms_models_and_their_accuracy_divergence_when_both_run``
+    below covers the two-neural-arms case. It uses a fake
+    ``onnxruntime``/``tokenizers`` pair standing in for the 90 MB production
     artefact (ADR-0016 rule 2: awkward enough to prove the pooling arithmetic
     runs — see ``tests/test_embedding.py``'s own such fakes — not a claim about
     matching the real graph's output).
@@ -823,14 +866,13 @@ def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_ar
     record = json.loads(written[0].read_text(encoding="utf-8"))
 
     environment = record["environment"]
-    assert environment["model"] == {
-        "value": {
+    assert environment["models"] == {
+        "embed-fp32": {
             "model_id": embedding.MODEL_ID,
             "revision": embedding.MODEL_REVISION,
             "checksum_sha256": embedding.FP32_MODEL_SHA256,
             "license": embedding.MODEL_LICENSE,
-        },
-        "reason": None,
+        }
     }
     assert environment["runtime_versions"]["onnxruntime"] == {
         "value": "9.9.9-fake",
@@ -839,6 +881,391 @@ def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_ar
 
     accuracy = record["results"]["embed-fp32"]["accuracy"]
     assert accuracy["status"] == "ok"
+
+
+def test_benchmark_records_both_neural_arms_models_and_their_accuracy_divergence_when_both_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run in which both ``embed-fp32`` and ``embed-int8`` initialise must
+    record both model identities (issue #67) - not just whichever one the
+    loop happened to measure last, which is exactly the bug a single
+    ``Environment.model`` slot could not avoid once a second neural arm
+    existed - and the int8 arm's per-family F1 divergence from the fp32 arm,
+    computed from this run's own two accuracy reports rather than asserted in
+    prose (issue #67's third bullet).
+
+    The two arms share one fake ``onnxruntime``/``tokenizers`` pair, so their
+    predictions are identical and every family's divergence is exactly
+    ``0.0`` — a small, deterministic outcome, not a claim about matching the
+    real graphs' output (ADR-0016 rule 2).
+    """
+    import hashlib
+    import types
+    from collections.abc import Mapping, Sequence
+    from typing import cast
+
+    from joinless import corpus as corpus_module
+    from joinless import embedding
+    from joinless.cli import main
+
+    class _FakeEncoding:
+        def __init__(
+            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
+        ) -> None:
+            self.ids = ids
+            self.attention_mask = attention_mask
+            self.type_ids = type_ids
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            del pad_token, pad_id
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            del max_length
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [
+                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
+            ]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            del path
+            return _FakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+
+        def run(
+            self, output_names: list[str] | None, input_feed: Mapping[str, object]
+        ) -> list[object]:
+            del output_names
+            rows = cast(list[list[int]], input_feed["input_ids"])
+            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
+            return [hidden]
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    # issue #68: the real graph's own quantized-operator census, read at run
+    # time - here made to match both embedding.INT8_QUANTIZED_OPERATORS and
+    # embedding.INT8_MATMUL_CONVERSION exactly (36 converted, 12 remaining), so
+    # this "both arms succeed" run also succeeds past that check.
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx",
+        _fake_onnx_module(
+            ["DynamicQuantizeLinear"] + ["MatMulInteger"] * 36 + ["MatMul"] * 12
+        ),
+    )
+
+    cache_dir = tmp_path / "cache"
+    fp32_dir = cache_dir / "fp32"
+    int8_dir = cache_dir / "int8"
+    fp32_dir.mkdir(parents=True)
+    int8_dir.mkdir(parents=True)
+    tokenizer_bytes = b"a fake tokenizer config"
+    fp32_model_bytes = b"a fake fp32 graph"
+    int8_model_bytes = b"a fake int8 graph"
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    (fp32_dir / "model.onnx").write_bytes(fp32_model_bytes)
+    (int8_dir / "model.onnx").write_bytes(int8_model_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "FP32_MODEL_SHA256", hashlib.sha256(fp32_model_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "INT8_MODEL_SHA256", hashlib.sha256(int8_model_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+    assert exit_code == 0
+
+    written = list((tmp_path / "benchmarks").glob("*.json"))
+    record = json.loads(written[0].read_text(encoding="utf-8"))
+
+    environment = record["environment"]
+    assert set(environment["models"]) == {"embed-fp32", "embed-int8"}
+    assert (
+        environment["models"]["embed-fp32"]["checksum_sha256"]
+        == embedding.FP32_MODEL_SHA256
+    )
+    assert (
+        environment["models"]["embed-int8"]["checksum_sha256"]
+        == embedding.INT8_MODEL_SHA256
+    )
+    assert (
+        environment["models"]["embed-fp32"]["checksum_sha256"]
+        != environment["models"]["embed-int8"]["checksum_sha256"]
+    )
+    # issue #68's first and second bullets: every record for an int8 arm
+    # carries the matmul-conversion census (finding 1: converted/fp32/remaining
+    # counts, not a bare operator-type list), read from the graph above - not
+    # asserted from embedding.INT8_MATMUL_CONVERSION directly, but produced by
+    # the same command path a reader would run themselves.
+    assert environment["quantized_operators"] == {
+        "value": {
+            "Gemm": {"converted_count": 0, "fp32_count": 0, "int8_count_remaining": 0},
+            "MatMul": {
+                "converted_count": 36,
+                "fp32_count": 48,
+                "int8_count_remaining": 12,
+            },
+        },
+        "reason": None,
+    }
+
+    assert record["results"]["embed-fp32"]["accuracy"]["status"] == "ok"
+    assert record["results"]["embed-int8"]["accuracy"]["status"] == "ok"
+
+    divergence = record["int8_accuracy_divergence"]
+    assert divergence["reason"] is None
+    assert divergence["value"]
+    # Both arms share one fake session/tokenizer pair, so every family's fp32
+    # and int8 F1 is identical - either both defined and equal (delta 0.0) or
+    # both undefined for the same reason (an empty split for that family under
+    # this corpus's small fixture is a real, if uninteresting, possibility).
+    for row in divergence["value"]:
+        if row["baseline_f1"]["value"] is None:
+            assert row["delta_f1"]["value"] is None
+        else:
+            assert row["delta_f1"]["value"] == pytest.approx(0.0)
+
+
+def test_benchmark_writes_no_record_when_the_int8_graph_does_not_match_its_recorded_operator_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #68's third bullet, constructed directly rather than reasoned
+    about: the fake int8 graph below reports a quantized-operator census
+    that is not ``embedding.INT8_QUANTIZED_OPERATORS`` (no operators
+    converted at all), so the whole run must refuse to write a record -
+    not mark just the int8 arm unavailable while ``overlap``, ``fuzzy`` and
+    ``embed-fp32``'s already-measured results are written as if nothing
+    were wrong. That is a stronger response than an ordinary checksum
+    mismatch (ADR-0013 rule 3, one arm marked unavailable, the record
+    still written): a graph whose operator census contradicts what the
+    checksum-verified artefact is recorded to contain means this run's own
+    understanding of what it measured cannot be trusted, not just one row
+    of it.
+    """
+    import hashlib
+    import types
+    from collections.abc import Mapping, Sequence
+    from typing import cast
+
+    from joinless import corpus as corpus_module
+    from joinless import embedding
+    from joinless.cli import main
+
+    class _FakeEncoding:
+        def __init__(
+            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
+        ) -> None:
+            self.ids = ids
+            self.attention_mask = attention_mask
+            self.type_ids = type_ids
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            del pad_token, pad_id
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            del max_length
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [
+                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
+            ]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            del path
+            return _FakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+
+        def run(
+            self, output_names: list[str] | None, input_feed: Mapping[str, object]
+        ) -> list[object]:
+            del output_names
+            rows = cast(list[list[int]], input_feed["input_ids"])
+            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
+            return [hidden]
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    # The mismatch: a graph that converted nothing at all, not
+    # embedding.INT8_QUANTIZED_OPERATORS.
+    monkeypatch.setitem(sys.modules, "onnx", _fake_onnx_module(["MatMul", "Add"]))
+
+    cache_dir = tmp_path / "cache"
+    fp32_dir = cache_dir / "fp32"
+    int8_dir = cache_dir / "int8"
+    fp32_dir.mkdir(parents=True)
+    int8_dir.mkdir(parents=True)
+    tokenizer_bytes = b"a fake tokenizer config"
+    fp32_model_bytes = b"a fake fp32 graph"
+    int8_model_bytes = b"a fake int8 graph"
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    (fp32_dir / "model.onnx").write_bytes(fp32_model_bytes)
+    (int8_dir / "model.onnx").write_bytes(int8_model_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "FP32_MODEL_SHA256", hashlib.sha256(fp32_model_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "INT8_MODEL_SHA256", hashlib.sha256(int8_model_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+
+    assert exit_code != 0
+    benchmarks_dir = tmp_path / "benchmarks"
+    assert not benchmarks_dir.exists() or list(benchmarks_dir.glob("*.json")) == []
+    err = capsys.readouterr().err
+    assert str(int8_dir / "model.onnx") in err
+    assert "MatMulInteger" in err
+
+
+def test_benchmark_writes_no_record_when_the_matmul_conversion_counts_do_not_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #68 finding 1's extension of the same guard, constructed
+    directly: a graph whose replacement operator *types* match
+    ``embedding.INT8_QUANTIZED_OPERATORS`` exactly (``DynamicQuantizeLinear``
+    and ``MatMulInteger`` both present, nothing extra) but whose *counts*
+    differ from ``embedding.INT8_MATMUL_CONVERSION`` (30 conversions where 36
+    are recorded) must refuse to write a record too - the old, type-only
+    check would have let this graph through.
+    """
+    import hashlib
+    import types
+    from collections.abc import Mapping, Sequence
+    from typing import cast
+
+    from joinless import corpus as corpus_module
+    from joinless import embedding
+    from joinless.cli import main
+
+    class _FakeEncoding:
+        def __init__(
+            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
+        ) -> None:
+            self.ids = ids
+            self.attention_mask = attention_mask
+            self.type_ids = type_ids
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            del pad_token, pad_id
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            del max_length
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [
+                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
+            ]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            del path
+            return _FakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+
+        def run(
+            self, output_names: list[str] | None, input_feed: Mapping[str, object]
+        ) -> list[object]:
+            del output_names
+            rows = cast(list[list[int]], input_feed["input_ids"])
+            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
+            return [hidden]
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    # The mismatch: types present are exactly right, but only 30 MatMulInteger
+    # nodes exist where the pinned census records 36.
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx",
+        _fake_onnx_module(
+            ["DynamicQuantizeLinear"] + ["MatMulInteger"] * 30 + ["MatMul"] * 18
+        ),
+    )
+
+    cache_dir = tmp_path / "cache"
+    fp32_dir = cache_dir / "fp32"
+    int8_dir = cache_dir / "int8"
+    fp32_dir.mkdir(parents=True)
+    int8_dir.mkdir(parents=True)
+    tokenizer_bytes = b"a fake tokenizer config"
+    fp32_model_bytes = b"a fake fp32 graph"
+    int8_model_bytes = b"a fake int8 graph"
+    (fp32_dir / "tokenizer.json").write_bytes(tokenizer_bytes)
+    (fp32_dir / "model.onnx").write_bytes(fp32_model_bytes)
+    (int8_dir / "model.onnx").write_bytes(int8_model_bytes)
+    monkeypatch.setattr(
+        embedding, "FP32_TOKENIZER_SHA256", hashlib.sha256(tokenizer_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "FP32_MODEL_SHA256", hashlib.sha256(fp32_model_bytes).hexdigest()
+    )
+    monkeypatch.setattr(
+        embedding, "INT8_MODEL_SHA256", hashlib.sha256(int8_model_bytes).hexdigest()
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+
+    assert exit_code != 0
+    benchmarks_dir = tmp_path / "benchmarks"
+    assert not benchmarks_dir.exists() or list(benchmarks_dir.glob("*.json")) == []
+    err = capsys.readouterr().err
+    assert str(int8_dir / "model.onnx") in err
+    assert "matmul-conversion census" in err
+    assert "30" in err
+    assert "36" in err
 
 
 # --- benchmark: environment fields are pinned to their real source, not a range
@@ -967,6 +1394,21 @@ def test_benchmark_records_the_pre_registered_expected_winners(
     assert record["expected_winners"]["winners"]["character noise"] == "fuzzy"
 
 
+def test_benchmark_records_an_absent_int8_accuracy_divergence_when_neither_neural_arm_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture every other benchmark test shares never sets
+    ``JOINLESS_MODEL_CACHE_DIR``, so neither neural arm produces a comparable
+    accuracy report here - ``int8_accuracy_divergence`` is therefore an
+    explicit absence with a reason (ADR-0013), never an empty list or a
+    silently-omitted field."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    divergence = record["int8_accuracy_divergence"]
+    assert divergence["value"] is None
+    assert divergence["reason"] is not None
+
+
 # --- benchmark: contradictions (ADR-0011 rule 4, issue #50) -------------------
 
 from joinless.evaluation import (
@@ -1046,9 +1488,9 @@ def test_find_contradictions_is_empty_when_the_expectation_holds() -> None:
 
 
 def test_find_contradictions_skips_an_arm_whose_accuracy_is_not_a_report() -> None:
-    """Only two arms are registered today (module docstring); an arm whose
-    ``get_scorer`` call failed carries ``InvalidRun``, not an
-    ``EvaluationReport`` - it must not be handed to
+    """An arm whose ``get_scorer`` call failed - unregistered, or registered
+    but unavailable (module docstring) - carries ``InvalidRun``, not an
+    ``EvaluationReport``. It must not be handed to
     ``joinless.evaluation.find_contradictions`` as if it had a real per-family
     table, and with only one comparable arm left the family is skipped
     entirely (that function's own docstring)."""
@@ -1063,6 +1505,126 @@ def test_find_contradictions_skips_an_arm_whose_accuracy_is_not_a_report() -> No
     }
 
     assert _find_contradictions(expected, arm_results) == ()
+
+
+# --- int8 accuracy divergence: computed once from the two arms' own reports
+# (issue #67's third bullet) -----------------------------------------------
+
+
+def test_int8_accuracy_divergence_computes_from_both_arms_own_reports() -> None:
+    from joinless.cli import _int8_accuracy_divergence
+
+    arm_results = {
+        "overlap": _result_with_accuracy("overlap", _report_with_f1(1.0)),
+        "embed-fp32": _result_with_accuracy("embed-fp32", _report_with_f1(1.0)),
+        "embed-int8": _result_with_accuracy("embed-int8", _report_with_f1(0.9)),
+    }
+
+    divergence = _int8_accuracy_divergence(arm_results)
+
+    assert divergence.reason is None
+    assert divergence.value is not None
+    [row] = divergence.value
+    assert row.family == "exact"
+    assert row.delta_f1.value == pytest.approx(-0.1)
+
+
+def test_int8_accuracy_divergence_is_absent_with_a_reason_when_fp32_did_not_run() -> (
+    None
+):
+    from joinless.cli import _int8_accuracy_divergence
+
+    arm_results = {
+        "embed-fp32": _result_with_accuracy(
+            "embed-fp32", InvalidRun(reason="'embed-fp32' is unavailable")
+        ),
+        "embed-int8": _result_with_accuracy("embed-int8", _report_with_f1(0.9)),
+    }
+
+    divergence = _int8_accuracy_divergence(arm_results)
+
+    assert divergence.value is None
+    assert divergence.reason is not None
+    assert "embed-fp32" in divergence.reason
+
+
+def test_int8_accuracy_divergence_is_absent_with_a_reason_when_int8_did_not_run() -> (
+    None
+):
+    from joinless.cli import _int8_accuracy_divergence
+
+    arm_results = {
+        "embed-fp32": _result_with_accuracy("embed-fp32", _report_with_f1(1.0)),
+        "embed-int8": _result_with_accuracy(
+            "embed-int8", InvalidRun(reason="'embed-int8' is unavailable")
+        ),
+    }
+
+    divergence = _int8_accuracy_divergence(arm_results)
+
+    assert divergence.value is None
+    assert divergence.reason is not None
+    assert "embed-int8" in divergence.reason
+
+
+def test_int8_accuracy_divergence_is_absent_with_a_reason_when_neither_arm_ran() -> (
+    None
+):
+    """Neither key is present at all (a caller building ``arm_results`` from
+    only the classical arms) - the same absence, reached the other way."""
+    from joinless.cli import _int8_accuracy_divergence
+
+    arm_results = {
+        "overlap": _result_with_accuracy("overlap", _report_with_f1(1.0)),
+    }
+
+    divergence = _int8_accuracy_divergence(arm_results)
+
+    assert divergence.value is None
+    assert divergence.reason is not None
+
+
+# --- quantized-operator census: read live from the int8 graph, keyed by candidate
+# operator type with converted/fp32/remaining counts (issue #68 finding 1) ----------
+
+
+def test_quantized_operators_is_absent_with_a_reason_when_no_int8_arm_ran() -> None:
+    from joinless.cli import _quantized_operators
+
+    result = _quantized_operators({})
+
+    assert result.value is None
+    assert result.reason == "no int8 arm in this run"
+
+
+def test_quantized_operators_reads_the_matmul_conversion_census_live_from_the_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from joinless import embedding
+    from joinless.cli import _quantized_operators
+    from joinless.runrecord import ModelIdentity
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnx",
+        _fake_onnx_module(
+            ["DynamicQuantizeLinear"] + ["MatMulInteger"] * 36 + ["MatMul"] * 12
+        ),
+    )
+    monkeypatch.setenv("JOINLESS_MODEL_CACHE_DIR", "/some/cache")
+    models = {
+        "embed-int8": ModelIdentity(
+            model_id=embedding.MODEL_ID,
+            revision=embedding.MODEL_REVISION,
+            checksum_sha256=embedding.INT8_MODEL_SHA256,
+            license=embedding.MODEL_LICENSE,
+        )
+    }
+
+    result = _quantized_operators(models)
+
+    assert result.reason is None
+    assert result.value == embedding.INT8_MATMUL_CONVERSION
 
 
 def test_format_contradictions_reports_none_broke_when_empty() -> None:

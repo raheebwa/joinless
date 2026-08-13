@@ -480,6 +480,83 @@ class Contradiction:
     actual_winners: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class AccuracyDivergence:
+    """How much one arm's per-family F1 differs from a baseline arm's,
+    computed from each arm's own :class:`EvaluationReport` in the same run
+    (ADR-0007: "quantization may hurt short strings differently from long
+    ones" — issue #67's third bullet). Never estimated, and never a second
+    evaluation pass: both F1 figures are read straight off the two reports
+    :func:`compute_accuracy_divergence`'s caller already has.
+
+    ``delta_f1`` is ``candidate_f1 - baseline_f1``, defined only when both
+    inputs are — the same "undefined propagates, never collapses to zero"
+    rule :func:`_f1` already applies to precision and recall (ADR-0013): a
+    delta computed against an undefined F1 would be a comparison against
+    nothing, not a real gap.
+    """
+
+    family: str
+    baseline_f1: Metric
+    candidate_f1: Metric
+    delta_f1: Metric
+
+
+def _delta_metric(baseline: Metric, candidate: Metric) -> Metric:
+    """``candidate.value - baseline.value``, or undefined with a reason
+    naming which side was undefined — mirrors :func:`_f1`'s own
+    either-side-undefined handling, applied to a difference instead of a
+    harmonic mean."""
+    if baseline.value is None:
+        return Metric(
+            value=None,
+            undefined_reason=f"baseline F1 is undefined: {baseline.undefined_reason}",
+        )
+    if candidate.value is None:
+        return Metric(
+            value=None,
+            undefined_reason=f"candidate F1 is undefined: {candidate.undefined_reason}",
+        )
+    return Metric(value=candidate.value - baseline.value, undefined_reason=None)
+
+
+def compute_accuracy_divergence(
+    *, baseline: EvaluationReport, candidate: EvaluationReport
+) -> tuple[AccuracyDivergence, ...]:
+    """Per-family F1 divergence of ``candidate`` from ``baseline``, in
+    ``baseline``'s own family order (issue #67's third bullet).
+
+    Both reports come from the same pooled corpus (ADR-0011 rule 3), so
+    ``candidate`` is expected to report every family ``baseline`` does. A
+    family ``candidate`` did not report is not silently dropped from the
+    table (ADR-0013): it is included with an explicit undefined
+    ``candidate_f1`` naming the gap, so a reader sees that the comparison
+    could not be drawn rather than seeing one fewer row with no explanation.
+    """
+    candidate_by_family = {row.family: row for row in candidate.per_family}
+    divergences = []
+    for baseline_row in baseline.per_family:
+        candidate_row = candidate_by_family.get(baseline_row.family)
+        if candidate_row is None:
+            candidate_f1 = Metric(
+                value=None,
+                undefined_reason=(
+                    f"{baseline_row.family!r} was not reported by the candidate arm"
+                ),
+            )
+        else:
+            candidate_f1 = candidate_row.f1
+        divergences.append(
+            AccuracyDivergence(
+                family=baseline_row.family,
+                baseline_f1=baseline_row.f1,
+                candidate_f1=candidate_f1,
+                delta_f1=_delta_metric(baseline_row.f1, candidate_f1),
+            )
+        )
+    return tuple(divergences)
+
+
 def find_contradictions(
     expected: ExpectedWinners, reports: Mapping[str, EvaluationReport]
 ) -> tuple[Contradiction, ...]:

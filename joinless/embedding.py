@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: MIT
-"""The fp32 embedding arm: tokenize, embed, mean-pool, compare (RFC-0001, ADR-0002).
+"""The embedding arms — fp32 and int8: tokenize, embed, mean-pool, compare (RFC-0001,
+ADR-0002, ADR-0007).
 
-**Model, pooling, similarity — the arm in one paragraph.** The graph is
-``sentence-transformers/all-MiniLM-L6-v2`` at revision :data:`MODEL_REVISION`, exported
-to ONNX and executed on ONNX Runtime's CPU provider (ADR-0002). Tokenization is
-``tokenizers.Tokenizer.from_file`` over a locally-fetched ``tokenizer.json`` — never
-``Tokenizer.from_pretrained``, which is the one member of that package that would put a
-network client on the path a comparison takes (ADR-0017). :func:`_mean_pool` averages the
-graph's per-token ``last_hidden_state`` over the positions ``attention_mask`` marks real,
-excluding padding; the pooled vector is then L2-normalised. :func:`_cosine_similarity`
-compares two such vectors and :meth:`EmbeddingScorer.score` rescales the result from
-``[-1, 1]`` to ``[0, 1]`` (RFC-0001's "Comparability"), so this arm's score sits on the
-same scale as ``overlap`` and ``fuzzy`` without being the same quantity.
+**Model, pooling, similarity — the two arms in one paragraph.** Both load
+``sentence-transformers/all-MiniLM-L6-v2`` at revision :data:`MODEL_REVISION`, executed on
+ONNX Runtime's CPU provider (ADR-0002): the fp32 arm the plain ONNX export, the int8 arm
+the same graph after ``onnxruntime.quantization.quantize_dynamic`` (ADR-0007) — "the fp32
+and int8 arms are the same class with different model artefacts" (RFC-0001), and that
+sentence is this module's organising fact: everywhere below that reads "this arm" or
+names one arm's function, its sibling has the identically-shaped counterpart named
+alongside it. Tokenization is ``tokenizers.Tokenizer.from_file`` over a locally-fetched
+``tokenizer.json`` — never ``Tokenizer.from_pretrained``, which is the one member of that
+package that would put a network client on the path a comparison takes (ADR-0017). Both
+arms share one tokenizer file (the int8 graph carries no tokenizer of its own to export —
+quantization touches weights, not vocabulary), read from the fp32 arm's own directory by
+:func:`resolve_int8_model_paths` rather than a second copy under ``int8/``.
+:func:`_mean_pool` averages the graph's per-token ``last_hidden_state`` over the positions
+``attention_mask`` marks real, excluding padding; the pooled vector is then
+L2-normalised. :func:`_cosine_similarity` compares two such vectors and
+:meth:`EmbeddingScorer.score` rescales the result from ``[-1, 1]`` to ``[0, 1]``
+(RFC-0001's "Comparability"), so either arm's score sits on the same scale as ``overlap``
+and ``fuzzy`` without being the same quantity.
 
 **Every arithmetic step is standard-library ``math``, not NumPy** (:func:`_mean_pool`,
 :func:`_l2_normalize`, :func:`_cosine_similarity`). ``onnxruntime.InferenceSession.run``
@@ -26,32 +35,36 @@ import of its own, at module level or otherwise, so nothing about testing its po
 similarity arithmetic requires NumPy to be installed at all.
 
 **The lazy-import boundary (ADR-0014, ADR-0017).** ``onnxruntime`` and ``tokenizers`` are
-each imported exactly once, inside :func:`probe_fp32` and :func:`load_fp32_scorer` — never
-at this module's top level. :class:`EmbeddingScorer` itself imports neither: it is
-constructed with an already-built tokenizer and inference session (RFC-0001's
-"``EmbeddingScorer`` is constructed with a model path and a runtime session"), so its own
-``prepare_all``/``prepare``/``score`` logic has no import of its own to hide behind a
-boundary — there is nothing there for a test to fake but two small objects exposing
-``encode_batch`` and ``run``, and no reason for those tests to need the real packages
-installed at all. :mod:`joinless.scoring` reaches this module only from inside its own
-lazy ``embed-fp32`` registration functions, mirroring exactly how it reaches ``rapidfuzz``
-from inside :class:`~joinless.scoring.FuzzyScorer` — so a classical-only run never imports
-this module, and this module never imports the runtime, until an embedding arm is actually
-requested and its :func:`probe_fp32` has already said yes.
+each imported exactly once per arm, inside that arm's own ``probe_*`` and ``load_*``
+functions (:func:`probe_fp32`/:func:`load_fp32_scorer`, :func:`probe_int8`/
+:func:`load_int8_scorer`) — never at this module's top level. :class:`EmbeddingScorer`
+itself imports neither: it is constructed with an already-built tokenizer and inference
+session (RFC-0001's "``EmbeddingScorer`` is constructed with a model path and a runtime
+session"), so its own ``prepare_all``/``prepare``/``score`` logic has no import of its own
+to hide behind a boundary — there is nothing there for a test to fake but two small
+objects exposing ``encode_batch`` and ``run``, and no reason for those tests to need the
+real packages installed at all. :mod:`joinless.scoring` reaches this module only from
+inside its own lazy ``embed-fp32``/``embed-int8`` registration functions, mirroring
+exactly how it reaches ``rapidfuzz`` from inside :class:`~joinless.scoring.FuzzyScorer` —
+so a classical-only run never imports this module, and this module never imports the
+runtime, until an embedding arm is actually requested and its own probe has already said
+yes.
 
-**Fail closed (ADR-0013, issue #59).** Three independent things must hold before this arm
-will run at all, checked cheapest-first by :func:`probe_fp32` so a missing dependency is
-never misreported as a missing artefact: the dependencies import, ``JOINLESS_MODEL_CACHE_DIR``
-names a directory, and both artefact files it should contain — the ONNX graph and the
-tokenizer configuration alongside it — exist and hash to the value recorded for this
-revision. Verification is :func:`joinless.measurement.verify_artifact`, called once per
-file and never reimplemented here (RFC-0017's consequences: "one checksum-verification
-mechanism for every artefact file an arm depends on, not a second one specific to the
-tokenizer"). Nothing on this path fetches a replacement for a missing or mismatched file;
-refusing, with a reason that names the setup command, is the correct response (ADR-0013),
-and :func:`resolve_model_paths` is the one place this module reads the cache-directory
-environment variable, so a caller supplying its own mapping (every test in this module)
-never touches the process environment to do it.
+**Fail closed (ADR-0013, issue #59, issue #67).** Three independent things must hold
+before either arm will run at all, checked cheapest-first by that arm's own ``probe_*``
+so a missing dependency is never misreported as a missing artefact:
+:func:`_probe_dependencies` (shared by both arms — the same two packages), then
+configuration (``JOINLESS_MODEL_CACHE_DIR`` names a directory), then
+:func:`_probe_artifacts` — both artefact files an arm depends on exist and hash to the
+value recorded for it. Verification is :func:`joinless.measurement.verify_artifact`,
+called once per file and never reimplemented here (RFC-0017's consequences: "one
+checksum-verification mechanism for every artefact file an arm depends on, not a second
+one specific to the tokenizer"). Nothing on this path fetches a replacement for a missing
+or mismatched file; refusing, with a reason that names the setup command, is the correct
+response (ADR-0013), and :func:`resolve_model_paths`/:func:`resolve_int8_model_paths` are
+the only two places this module reads the cache-directory environment variable, so a
+caller supplying its own mapping (every test in this module) never touches the process
+environment to do it.
 
 **Batched preparation (RFC-0001, ADR-0009, issue #61).** ``prepare_all`` is the production
 call pattern: it collects the distinct non-blank names in a batch — a name that recurs
@@ -85,7 +98,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from joinless.measurement import ArtifactRequirement, verify_artifact
-from joinless.runrecord import ModelIdentity
+from joinless.runrecord import MatmulConversion, ModelIdentity
 
 # Recorded identity of the source model (benchmarks/20260812T181752Z-quantization-spike.json,
 # the record produced by RFC-0004's spike). ADR-0002 constraint 3: the source model and
@@ -105,6 +118,7 @@ MODEL_LICENSE = "apache-2.0"
 # artefact, reused here rather than invented a second time.
 CACHE_DIR_ENV_VAR = "JOINLESS_MODEL_CACHE_DIR"
 _FP32_SUBDIRECTORY = "fp32"
+_INT8_SUBDIRECTORY = "int8"
 _MODEL_FILENAME = "model.onnx"
 _TOKENIZER_FILENAME = "tokenizer.json"
 
@@ -119,6 +133,71 @@ FP32_TOKENIZER_SHA256 = (
     "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"
 )
 
+# The int8 graph's own checksum under $JOINLESS_MODEL_CACHE_DIR/int8 (ADR-0007,
+# issue #67). The int8 arm's tokenizer is not a second, independently-verified
+# file: it is the fp32 arm's own tokenizer.json (RFC-0004 records the two arms
+# as sharing one tokenizer), so there is no INT8_TOKENIZER_SHA256 alongside this
+# — FP32_TOKENIZER_SHA256 is reused, verified against the copy under fp32/.
+INT8_MODEL_SHA256 = "eebed71d4f7671a4d8093decee1fb23018992e139813f30d502bf16ee408208e"
+
+# The operator types RFC-0004's spike recorded present in the int8 graph and absent
+# from the fp32 graph — benchmarks/20260812T181752Z-quantization-spike.json's own
+# "operators.added" — for the exact artefact INT8_MODEL_SHA256 checksums (issue #68).
+# Pinned as a literal the same way INT8_MODEL_SHA256 itself is: a fact about this one
+# checksum-verified artefact, not re-derived from the spike record at run time. This
+# is what :func:`verify_int8_operators` checks a fresh, live read against — the run
+# record's own ``quantized_operators`` value is always that live read
+# (:func:`joinless.cli._quantized_operators`), never this constant transplanted
+# directly, which is what keeps "read from the graph at run time" (issue #68's second
+# bullet) true even though this expectation was itself sourced from the spike.
+INT8_QUANTIZED_OPERATORS: tuple[str, ...] = ("DynamicQuantizeLinear", "MatMulInteger")
+
+# The operator types onnxruntime.quantization.quantize_dynamic introduces in place of
+# a converted MatMul/Gemm (RFC-0004 step 5) — reimplemented from
+# spikes/quantization/operators.py's QUANTIZED_MATMUL_REPLACEMENTS rather than
+# imported: nothing under joinless/ imports spikes/ (spikes/quantization/README.md,
+# "Why this lives outside joinless/" — importing spike tooling into the shipped
+# package would make joinless/ depend on code that ships in no wheel and will not run
+# again, the same reasoning this module's own docstring already gives for
+# reimplementing spikes/quantization/smoke.py's pooling arithmetic rather than
+# importing it).
+_QUANTIZATION_REPLACEMENT_OPERATORS = (
+    "DynamicQuantizeLinear",
+    "MatMulInteger",
+    "QGemm",
+    "QLinearMatMul",
+)
+
+# Candidate operator type -> the single replacement type
+# onnxruntime.quantization.quantize_dynamic introduces when it converts a node of
+# that type (RFC-0004 step 5) — the two keys
+# benchmarks/20260812T181752Z-quantization-spike.json's own
+# "operators.matmul_conversion" reports on ("Gemm", "MatMul"). A converted node's
+# *type* changes to its replacement, so a candidate type's pre-conversion count is
+# always exactly its own remaining count plus its replacement's count in the same
+# graph — :func:`matmul_conversion_census` needs no second, earlier graph to
+# establish "how many were there before" (issue #68's second bullet: read from
+# *the* graph, singular).
+_MATMUL_CANDIDATE_REPLACEMENTS: Mapping[str, str] = {
+    "Gemm": "QGemm",
+    "MatMul": "MatMulInteger",
+}
+
+# The matmul-conversion census RFC-0004's spike recorded for the exact artefact
+# INT8_MODEL_SHA256 checksums — benchmarks/20260812T181752Z-quantization-spike.json's
+# own "operators.matmul_conversion" (issue #68's stated purpose: "how many of the
+# graph's matmuls were converted and how many remain in fp32"). Pinned as a literal
+# the same way INT8_QUANTIZED_OPERATORS is, and checked the same way: this is what
+# :func:`verify_int8_operators` compares a fresh, live-read census against — the run
+# record's own value is always that live read, never this constant transplanted
+# directly (issue #68's second bullet).
+INT8_MATMUL_CONVERSION: Mapping[str, MatmulConversion] = {
+    "Gemm": MatmulConversion(converted_count=0, fp32_count=0, int8_count_remaining=0),
+    "MatMul": MatmulConversion(
+        converted_count=36, fp32_count=48, int8_count_remaining=12
+    ),
+}
+
 # tokenizer_config.json's own recorded "max_length" for this artefact — truncation is
 # configured to match what the artefact already declares for itself, not a value chosen
 # independently of it.
@@ -127,11 +206,22 @@ _PAD_TOKEN = "[PAD]"
 _PAD_ID = 0
 
 _ARM_NAME = "embed-fp32"
+_INT8_ARM_NAME = "embed-int8"
 
 _SETUP_HINT = (
     f"set {CACHE_DIR_ENV_VAR} to a writable directory and fetch the model artefact by "
     "following spikes/quantization/README.md's Setup section, then running "
     "`python -m spikes.quantization.model` and `python -m spikes.quantization.export_fp32`"
+)
+
+# One extra step beyond _SETUP_HINT: the int8 graph is quantize_dynamic's output
+# over the fp32 export (ADR-0007), so producing it needs that export to already
+# exist plus the quantization step itself.
+_INT8_SETUP_HINT = (
+    f"set {CACHE_DIR_ENV_VAR} to a writable directory and fetch the model artefact by "
+    "following spikes/quantization/README.md's Setup section, then running "
+    "`python -m spikes.quantization.model`, `python -m spikes.quantization.export_fp32` "
+    "and `python -m spikes.quantization.quantize_int8`"
 )
 
 
@@ -145,8 +235,32 @@ class CacheDirNotSetError(RuntimeError):
     """
 
 
-def resolve_model_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
-    """The fp32 model and tokenizer paths under the configured cache directory.
+class QuantizedOperatorMismatchError(RuntimeError):
+    """The int8 graph's own quantized-operator census does not equal
+    :data:`INT8_QUANTIZED_OPERATORS` (issue #68's third bullet: "a record for a run
+    whose graph does not match its recorded operator list is not produced").
+
+    Raised by :func:`verify_int8_operators`, never caught inside this module — a
+    checksum mismatch (:func:`probe_int8`) marks *only* the int8 arm unavailable and
+    the run record is still written for whichever arms did initialise (ADR-0013 rule
+    3, "an arm that cannot initialise is recorded... never omitted"). This is a
+    stronger signal: the checksum-verified bytes did not produce the operator census
+    this exact artefact is recorded to have, which means what this run believes about
+    quantization is not to be trusted, not just that one arm's row. Deliberately not
+    caught in :mod:`joinless.embedding` itself, so :mod:`joinless.cli` — the one place
+    that decides what "no record is produced" means for a whole run — is the only
+    place this is handled.
+    """
+
+
+def _resolve_paths(
+    environ: Mapping[str, str], *, model_subdirectory: str, tokenizer_subdirectory: str
+) -> tuple[Path, Path]:
+    """The model and tokenizer paths under the configured cache directory, each
+    resolved from its own subdirectory — shared by :func:`resolve_model_paths`
+    (fp32, both subdirectories the same) and :func:`resolve_int8_model_paths`
+    (int8 model, fp32 tokenizer), so "how the cache directory is read" is one
+    function both arms call rather than two copies that could drift apart.
 
     Takes the environment mapping as a parameter rather than reading ``os.environ``
     itself, mirroring ``spikes/quantization/cli_common.resolve_cache_dir`` — not
@@ -158,8 +272,32 @@ def resolve_model_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
     value = environ.get(CACHE_DIR_ENV_VAR)
     if not value:
         raise CacheDirNotSetError(f"{CACHE_DIR_ENV_VAR} is not set; {_SETUP_HINT}.")
-    fp32_dir = Path(value) / _FP32_SUBDIRECTORY
-    return fp32_dir / _MODEL_FILENAME, fp32_dir / _TOKENIZER_FILENAME
+    base = Path(value)
+    return (
+        base / model_subdirectory / _MODEL_FILENAME,
+        base / tokenizer_subdirectory / _TOKENIZER_FILENAME,
+    )
+
+
+def resolve_model_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
+    """The fp32 model and tokenizer paths under the configured cache directory."""
+    return _resolve_paths(
+        environ,
+        model_subdirectory=_FP32_SUBDIRECTORY,
+        tokenizer_subdirectory=_FP32_SUBDIRECTORY,
+    )
+
+
+def resolve_int8_model_paths(environ: Mapping[str, str]) -> tuple[Path, Path]:
+    """The int8 model path under its own subdirectory, and the fp32 arm's own
+    tokenizer path — the two arms share one tokenizer file (RFC-0004: "the
+    tokenizer is shared with fp32"), so this never reads a second copy from an
+    ``int8`` subdirectory that does not exist."""
+    return _resolve_paths(
+        environ,
+        model_subdirectory=_INT8_SUBDIRECTORY,
+        tokenizer_subdirectory=_FP32_SUBDIRECTORY,
+    )
 
 
 def artifact_requirements_fp32(
@@ -180,6 +318,21 @@ def artifact_requirements_fp32(
     model_path, tokenizer_path = resolve_model_paths(env)
     return (
         ArtifactRequirement(path=model_path, sha256=FP32_MODEL_SHA256),
+        ArtifactRequirement(path=tokenizer_path, sha256=FP32_TOKENIZER_SHA256),
+    )
+
+
+def artifact_requirements_int8(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[ArtifactRequirement, ArtifactRequirement]:
+    """The int8 model and shared fp32 tokenizer :class:`~joinless.measurement.
+    ArtifactRequirement` pair — mirrors :func:`artifact_requirements_fp32`
+    exactly, over :func:`resolve_int8_model_paths` and :data:`INT8_MODEL_SHA256`
+    instead."""
+    env = os.environ if environ is None else environ
+    model_path, tokenizer_path = resolve_int8_model_paths(env)
+    return (
+        ArtifactRequirement(path=model_path, sha256=INT8_MODEL_SHA256),
         ArtifactRequirement(path=tokenizer_path, sha256=FP32_TOKENIZER_SHA256),
     )
 
@@ -206,19 +359,28 @@ def model_identity_fp32() -> ModelIdentity:
     )
 
 
-def probe_fp32(environ: Mapping[str, str] | None = None) -> str | None:
-    """``None`` when the fp32 arm can be constructed; otherwise the reason it cannot.
+def model_identity_int8() -> ModelIdentity:
+    """This arm's model identity, revision, checksum and licence — mirrors
+    :func:`model_identity_fp32` exactly: same :data:`MODEL_ID`,
+    :data:`MODEL_REVISION` and :data:`MODEL_LICENSE` (RFC-0001: "the fp32 and
+    int8 arms are the same class with different model artefacts" — the
+    identity and licence describe the *model*, not the precision it was
+    exported at), but :data:`INT8_MODEL_SHA256`, the one fact that actually
+    differs between the two artefacts."""
+    return ModelIdentity(
+        model_id=MODEL_ID,
+        revision=MODEL_REVISION,
+        checksum_sha256=INT8_MODEL_SHA256,
+        license=MODEL_LICENSE,
+    )
 
-    This is the check :func:`joinless.scoring.get_scorer` runs, through
-    :mod:`joinless.scoring`'s own lazy ``embed-fp32`` registration, before it will call
-    :func:`load_fp32_scorer` (ADR-0013). Checks run cheapest-first and stop at the first
-    failure: dependency importability, then configuration, then the artefact files
-    themselves — hashing a 90 MB graph is the most expensive check here, so it never runs
-    when a cheaper check already explains why the arm is unavailable.
 
-    ``environ`` defaults to ``os.environ`` — this is the one function in this module that
-    reads it, and only when a caller has not supplied its own mapping.
-    """
+def _probe_dependencies() -> str | None:
+    """``None`` when both ``onnxruntime`` and ``tokenizers`` import; otherwise the
+    reason one of them does not. Shared by :func:`probe_fp32` and :func:`probe_int8`
+    — both arms need the same two packages, so whether they are importable is a fact
+    about the process, not about which arm asked (RFC-0001's "same class, different
+    artefacts" applies to this check too)."""
     try:
         import onnxruntime  # noqa: F401
     except ImportError as exc:
@@ -235,35 +397,203 @@ def probe_fp32(environ: Mapping[str, str] | None = None) -> str | None:
             f"({exc}); install with `pip install 'joinless[neural]'`"
         )
 
+    return None
+
+
+def _probe_artifacts(
+    requirements: tuple[ArtifactRequirement, ArtifactRequirement], setup_hint: str
+) -> str | None:
+    """``None`` when every requirement in ``requirements`` verifies; otherwise the
+    first failure's reason, with ``setup_hint`` appended — shared by
+    :func:`probe_fp32` and :func:`probe_int8`, which differ only in which
+    requirements and which hint they pass in."""
+    for requirement in requirements:
+        reason = verify_artifact(requirement)
+        if reason is not None:
+            return f"{reason}; {setup_hint}"
+    return None
+
+
+def probe_fp32(environ: Mapping[str, str] | None = None) -> str | None:
+    """``None`` when the fp32 arm can be constructed; otherwise the reason it cannot.
+
+    This is the check :func:`joinless.scoring.get_scorer` runs, through
+    :mod:`joinless.scoring`'s own lazy ``embed-fp32`` registration, before it will call
+    :func:`load_fp32_scorer` (ADR-0013). Checks run cheapest-first and stop at the first
+    failure: dependency importability (:func:`_probe_dependencies`), then configuration,
+    then the artefact files themselves (:func:`_probe_artifacts`) — hashing a 90 MB
+    graph is the most expensive check here, so it never runs when a cheaper check
+    already explains why the arm is unavailable.
+
+    ``environ`` defaults to ``os.environ`` — this is one of two functions in this
+    module that reads it (the other is :func:`probe_int8`), and only when a caller has
+    not supplied its own mapping.
+    """
+    dependency_reason = _probe_dependencies()
+    if dependency_reason is not None:
+        return dependency_reason
+
     env = os.environ if environ is None else environ
     try:
         requirements = artifact_requirements_fp32(env)
     except CacheDirNotSetError as exc:
         return str(exc)
 
-    for requirement in requirements:
-        reason = verify_artifact(requirement)
-        if reason is not None:
-            return f"{reason}; {_SETUP_HINT}"
-
-    return None
+    return _probe_artifacts(requirements, _SETUP_HINT)
 
 
-def load_fp32_scorer(environ: Mapping[str, str] | None = None) -> EmbeddingScorer:
-    """Build the fp32 arm for real: resolve paths, load the tokenizer, open the session.
+def probe_int8(environ: Mapping[str, str] | None = None) -> str | None:
+    """``None`` when the int8 arm can be constructed; otherwise the reason it cannot.
 
-    Assumes :func:`probe_fp32` has already returned ``None`` for the same ``environ`` —
-    exactly how :func:`joinless.scoring.get_scorer` calls it, probe then factory, never
-    the reverse — so artefact verification is not repeated here: hashing the graph a
-    second time on every construction would cost real wall-clock time for a check
-    already passed.
+    Mirrors :func:`probe_fp32` exactly, over :func:`artifact_requirements_int8` and
+    :data:`_INT8_SETUP_HINT` instead — this is the check
+    :func:`joinless.scoring.get_scorer` runs before it will call
+    :func:`load_int8_scorer` (ADR-0013).
+    """
+    dependency_reason = _probe_dependencies()
+    if dependency_reason is not None:
+        return dependency_reason
+
+    env = os.environ if environ is None else environ
+    try:
+        requirements = artifact_requirements_int8(env)
+    except CacheDirNotSetError as exc:
+        return str(exc)
+
+    return _probe_artifacts(requirements, _INT8_SETUP_HINT)
+
+
+def read_operator_counts(model_path: Path) -> Mapping[str, int]:
+    """A node count per distinct ONNX operator type in ``model_path``'s graph.
+
+    ``onnx`` is imported here, at call time (ADR-0014, ADR-0017) — not
+    ``onnxruntime``, whose loaded ``InferenceSession`` optimises the graph and never
+    exposes the raw node list this reads. ``onnx`` is already part of the ``neural``
+    install profile in ``pyproject.toml``, the same profile ``onnxruntime`` and
+    ``tokenizers`` belong to, so reaching for it here introduces no dependency this
+    arm did not already carry.
+
+    The one place this module reads ``model_path``'s graph — :func:`read_operator_types`
+    and :func:`matmul_conversion_census` (via :func:`verify_int8_operators`) both build
+    on this rather than loading the graph a second time, so "how many nodes of each
+    type" is answered once per call, not once per question asked of it.
+    """
+    import onnx
+
+    model = onnx.load(str(model_path))
+    counts: dict[str, int] = {}
+    for node in model.graph.node:
+        counts[node.op_type] = counts.get(node.op_type, 0) + 1
+    return counts
+
+
+def read_operator_types(model_path: Path) -> frozenset[str]:
+    """The distinct ONNX operator types ``model_path``'s graph contains — the
+    node counts :func:`read_operator_counts` already read, reduced to their keys."""
+    return frozenset(read_operator_counts(model_path))
+
+
+def quantized_operators_present(operator_types: frozenset[str]) -> tuple[str, ...]:
+    """Which of :data:`_QUANTIZATION_REPLACEMENT_OPERATORS` are actually present in
+    ``operator_types`` — sorted, so the result is deterministic regardless of set
+    iteration order.
+
+    A pure function of a set of operator-type names, so it is testable against a
+    hand-built set and needs no real graph (mirrors
+    spikes/quantization/operators.py's ``classify_matmul_conversion``, reimplemented
+    rather than imported — see :class:`QuantizedOperatorMismatchError` and this
+    module's docstring for why nothing here imports ``spikes/``).
+    """
+    return tuple(
+        sorted(op for op in _QUANTIZATION_REPLACEMENT_OPERATORS if op in operator_types)
+    )
+
+
+def matmul_conversion_census(
+    operator_counts: Mapping[str, int],
+) -> Mapping[str, MatmulConversion]:
+    """How many of each candidate-for-quantization operator type
+    (:data:`_MATMUL_CANDIDATE_REPLACEMENTS`'s keys) converted, and how many
+    remain fp32, given one graph's own live-read ``operator_counts`` (issue
+    #68's stated purpose: "how many of the graph's matmuls were converted and
+    how many remain in fp32").
+
+    A pure function of a single graph's operator-type counts — mirrors
+    :func:`quantized_operators_present`'s own "pure function of a set of
+    operator-type names" shape, testable against a hand-built mapping and
+    needing no real graph. A candidate or replacement type absent from
+    ``operator_counts`` counts as zero, not a missing key.
+    """
+    census = {}
+    for candidate, replacement in _MATMUL_CANDIDATE_REPLACEMENTS.items():
+        converted = operator_counts.get(replacement, 0)
+        remaining = operator_counts.get(candidate, 0)
+        census[candidate] = MatmulConversion(
+            converted_count=converted,
+            fp32_count=converted + remaining,
+            int8_count_remaining=remaining,
+        )
+    return census
+
+
+def verify_int8_operators(
+    model_path: Path,
+) -> tuple[tuple[str, ...], Mapping[str, MatmulConversion]]:
+    """Read ``model_path``'s graph once and confirm both its quantized-operator
+    census and its matmul-conversion census equal what RFC-0004's spike
+    recorded for the exact artefact :data:`INT8_MODEL_SHA256` checksums —
+    :data:`INT8_QUANTIZED_OPERATORS` and :data:`INT8_MATMUL_CONVERSION`
+    respectively (issue #68's third bullet).
+
+    Returns the freshly-read ``(operator types present, matmul-conversion
+    census)`` pair on a match — this, not either pinned constant, is what a
+    caller persists as the run record's ``quantized_operators`` value (issue
+    #68's second bullet: read at run time, not copied from the spike record).
+    Raises :class:`QuantizedOperatorMismatchError` on any other census for
+    either check, including a subset or superset of what was expected:
+    equality is checked, not containment, because a graph with a different
+    census is a different graph, not a partially-matching one. The
+    operator-type check runs first — a graph missing ``MatMulInteger``
+    entirely is the more fundamental mismatch, and its message names the
+    missing type directly rather than folding it into a conversion count of
+    zero that would read as "nothing converted" rather than "this type is
+    absent".
+    """
+    operator_counts = read_operator_counts(model_path)
+    operator_types = frozenset(operator_counts)
+    found = quantized_operators_present(operator_types)
+    if found != INT8_QUANTIZED_OPERATORS:
+        raise QuantizedOperatorMismatchError(
+            f"int8 graph at {model_path} has quantized-operator census "
+            f"{list(found)}, expected {list(INT8_QUANTIZED_OPERATORS)} "
+            "(benchmarks/20260812T181752Z-quantization-spike.json's recorded "
+            "operators)"
+        )
+
+    census = matmul_conversion_census(operator_counts)
+    if census != INT8_MATMUL_CONVERSION:
+        raise QuantizedOperatorMismatchError(
+            f"int8 graph at {model_path} has matmul-conversion census "
+            f"{dict(census)}, expected {dict(INT8_MATMUL_CONVERSION)} "
+            "(benchmarks/20260812T181752Z-quantization-spike.json's recorded "
+            "operators.matmul_conversion)"
+        )
+    return found, census
+
+
+def _build_scorer(
+    *, name: str, model_path: Path, tokenizer_path: Path
+) -> EmbeddingScorer:
+    """Load the tokenizer, open the session, wrap both in an
+    :class:`EmbeddingScorer` named ``name`` — the construction
+    :func:`load_fp32_scorer` and :func:`load_int8_scorer` share: RFC-0001's "the
+    fp32 and int8 arms are the same class with different model artefacts" holds
+    here structurally, since nothing about this function reads either arm's
+    name beyond the one it is given to attach.
 
     ``onnxruntime`` and ``tokenizers`` are imported here, not at module level (ADR-0014,
     ADR-0017) — see the module docstring for why that boundary matters.
     """
-    env = os.environ if environ is None else environ
-    model_path, tokenizer_path = resolve_model_paths(env)
-
     import onnxruntime
     from tokenizers import Tokenizer
 
@@ -275,7 +605,37 @@ def load_fp32_scorer(environ: Mapping[str, str] | None = None) -> EmbeddingScore
         str(model_path), providers=["CPUExecutionProvider"]
     )
 
-    return EmbeddingScorer(name=_ARM_NAME, session=session, tokenizer=tokenizer)
+    return EmbeddingScorer(name=name, session=session, tokenizer=tokenizer)
+
+
+def load_fp32_scorer(environ: Mapping[str, str] | None = None) -> EmbeddingScorer:
+    """Build the fp32 arm for real: resolve paths, then :func:`_build_scorer`.
+
+    Assumes :func:`probe_fp32` has already returned ``None`` for the same ``environ`` —
+    exactly how :func:`joinless.scoring.get_scorer` calls it, probe then factory, never
+    the reverse — so artefact verification is not repeated here: hashing the graph a
+    second time on every construction would cost real wall-clock time for a check
+    already passed.
+    """
+    env = os.environ if environ is None else environ
+    model_path, tokenizer_path = resolve_model_paths(env)
+    return _build_scorer(
+        name=_ARM_NAME, model_path=model_path, tokenizer_path=tokenizer_path
+    )
+
+
+def load_int8_scorer(environ: Mapping[str, str] | None = None) -> EmbeddingScorer:
+    """Build the int8 arm for real: resolve paths, then :func:`_build_scorer`.
+
+    Mirrors :func:`load_fp32_scorer` exactly, over
+    :func:`resolve_int8_model_paths` instead — assumes :func:`probe_int8` has
+    already returned ``None`` for the same ``environ``.
+    """
+    env = os.environ if environ is None else environ
+    model_path, tokenizer_path = resolve_int8_model_paths(env)
+    return _build_scorer(
+        name=_INT8_ARM_NAME, model_path=model_path, tokenizer_path=tokenizer_path
+    )
 
 
 class _Encoding(Protocol):
