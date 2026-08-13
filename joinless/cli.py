@@ -108,9 +108,10 @@ from joinless.evaluation import (
     ExpectedWinners,
     InvalidRun,
     Metric,
+    SealedTestAccuracy,
     SelectedThreshold,
     compute_accuracy_divergence,
-    evaluate_sealed_test,
+    evaluate_sealed_test_with_variation,
     find_contradictions,
     freeze_threshold,
     select_threshold,
@@ -342,18 +343,25 @@ _REPETITION_COUNT = 20
 #
 # v3 -> v4: `results.<arm>.preparation` was added (issue #65's third bullet) - each
 # arm's naive and hoisted preparation paths, each self-tagged with the path that
-# produced it. A new required field on every arm's result is exactly the kind of
-# breaking shape change the v2 -> v3 comment above already names the policy for.
+# produced it; `results.<arm>.preparation_cost` (issue #66 - hoisted/naive
+# preparation *time*, as distinct from `preparation`'s score-equality-only proof);
+# and a new top-level `preparation_asymmetry` field (issue #66's third bullet -
+# the classical/neural hoist speed-up comparison, carrying the candidate-bucket
+# occupancy distribution it was measured over rather than leaving a reader to
+# derive either from the per-arm figures). Several changes, one publication, one
+# transition - the same bundling the v2 -> v3 paragraph above already does for
+# its own three changes.
 #
-# v4 -> v5: three more additions, all issue #66 - `results.<arm>.preparation_cost`
-# (hoisted/naive preparation *time*, as distinct from v4's score-equality-only
-# `preparation`), and two new top-level fields, `bucket_occupancy` (the candidate-
-# bucket occupancy distribution the run's preparation-cost sample was drawn from)
-# and `preparation_asymmetry` (the classical/neural hoist speed-up comparison,
-# reported as a result rather than left for a reader to derive). A new required
-# field anywhere in the record is the same breaking shape change the v2 -> v3
-# comment above already names the policy for.
-_SCHEMA = "benchmark-v4"
+# v4 -> v5: `results.<arm>.accuracy` changed shape (issue #97, ADR-0011 rule 3).
+# What was a bare per-family/aggregate report is now a `SealedTestAccuracy`
+# carrying that same pooled report (`pooled`), each seed's own report
+# (`by_seed`), the seed-to-seed variation computed from them (`variation`), and
+# a sentence naming which question `pooled` answers and which `by_seed` does
+# (`pooled_answers`/`by_seed_answers`) - so a reported per-family figure never
+# travels without the spread that says whether it depends on one draw. A new
+# required shape on every arm's accuracy result is the same breaking change the
+# v2 -> v3 comment above already names the policy for.
+_SCHEMA = "benchmark-v5"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and
@@ -774,6 +782,7 @@ def _preparation_comparison(
 
 def _measure_arm(
     arm: str,
+    corpora: Sequence[Corpus],
     pooled: Corpus,
     left_name: str,
     right_name: str,
@@ -794,6 +803,15 @@ def _measure_arm(
     ``selected_thresholds`` list. The third element is what ``arm`` loaded as
     a model, if anything (:func:`_model_identity`) — ``None`` for the same
     "never got this far" arms, and for every classical arm regardless.
+
+    ``corpora`` is every seed's own corpus (issue #97, ADR-0011 rule 3) —
+    ``accuracy`` reports each one's own sealed-test result alongside the
+    pooled figure ``pooled`` already produces, and the seed-to-seed variation
+    computed from them, all under the one ``frozen`` threshold selected from
+    ``pooled``'s calibration split. That threshold — not a per-seed one — is
+    what keeps the procedure identical across seeds the same way it is
+    already identical across arms (ADR-0011 rule 2); issue #97 does not
+    reopen how the threshold itself is chosen.
 
     ``sample`` is the run's one shared preparation-cost candidate set
     (issue #66, :func:`_build_preparation_sample`) — every arm's
@@ -821,7 +839,9 @@ def _measure_arm(
 
     selected = select_threshold(pooled, scorer)
     frozen = freeze_threshold(selected)
-    accuracy = evaluate_sealed_test(pooled, scorer, frozen)
+    accuracy = evaluate_sealed_test_with_variation(
+        corpora=corpora, pooled=pooled, scorer=scorer, frozen=frozen
+    )
     warm_latency = measure_warm_latency(
         arm,
         left_name,
@@ -865,11 +885,16 @@ def _find_contradictions(
     skip a family such as "near-miss negative" wherever its expected winner
     is an arm that did not run in this environment (module docstring) —
     a fact this function does not re-decide, only feeds correctly.
+
+    Compares ``pooled`` reports (issue #97): the pre-registered expectation
+    is a statement about which arm wins each family across the full,
+    seed-enriched sealed test — the question :attr:`SealedTestAccuracy.pooled`
+    answers — not about any one seed's own draw.
     """
     reports: dict[str, EvaluationReport] = {
-        arm: result.accuracy
+        arm: result.accuracy.pooled
         for arm, result in arm_results.items()
-        if isinstance(result.accuracy, EvaluationReport)
+        if isinstance(result.accuracy, SealedTestAccuracy)
     }
     return find_contradictions(expected, reports)
 
@@ -899,10 +924,15 @@ def _int8_accuracy_divergence(
     reported as an explicit absence with a reason (ADR-0013) — never a
     fabricated comparison, and never an empty tuple, which would look like
     "computed, and nothing to report" rather than "not computed at all".
+
+    Compares ``pooled`` reports (issue #97), the same as
+    :func:`_find_contradictions`: whether quantization changed a family's
+    accuracy is a question about the full sealed test, not about any one
+    seed's own draw.
     """
     baseline_result = arm_results.get(_INT8_DIVERGENCE_BASELINE_ARM)
     if baseline_result is None or not isinstance(
-        baseline_result.accuracy, EvaluationReport
+        baseline_result.accuracy, SealedTestAccuracy
     ):
         return Maybe(
             value=None,
@@ -913,7 +943,7 @@ def _int8_accuracy_divergence(
         )
     candidate_result = arm_results.get(_INT8_DIVERGENCE_CANDIDATE_ARM)
     if candidate_result is None or not isinstance(
-        candidate_result.accuracy, EvaluationReport
+        candidate_result.accuracy, SealedTestAccuracy
     ):
         return Maybe(
             value=None,
@@ -924,7 +954,8 @@ def _int8_accuracy_divergence(
         )
     return Maybe(
         value=compute_accuracy_divergence(
-            baseline=baseline_result.accuracy, candidate=candidate_result.accuracy
+            baseline=baseline_result.accuracy.pooled,
+            candidate=candidate_result.accuracy.pooled,
         ),
         reason=None,
     )
@@ -1096,7 +1127,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     model_identities: dict[str, ModelIdentity] = {}
     for arm in _ARMS:
         result, selected, identity = _measure_arm(
-            arm, pooled, left_name, right_name, power_mode, preparation_sample
+            arm, corpora, pooled, left_name, right_name, power_mode, preparation_sample
         )
         assembly.add_arm(arm, result)
         arm_results[arm] = result

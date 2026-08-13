@@ -13,8 +13,11 @@ Every record carries:
 - Evaluation set identity and case mixture
 - Thread count, warm-up count, repetitions, power mode
 - The exact command that produced it
-- Per-arm results, per perturbation family
+- Per-arm accuracy, per perturbation family, both pooled across every seed and per seed,
+  each stating which question it answers, plus the seed-to-seed variation behind the
+  pooled figure — never one without the other (RFC-0002 "Per-seed accuracy reporting")
 - The int8 arm's per-family accuracy divergence from the fp32 arm, where both ran
+  (computed from each arm's pooled figure)
 - Each arm's hoisted and naive preparation cost, measured over the run's own shared
   candidate set
 - The candidate-bucket occupancy distribution that set produced, and the grid cell size

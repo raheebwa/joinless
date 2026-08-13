@@ -14,6 +14,8 @@ from joinless.evaluation import (
     ExpectedWinners,
     FamilyResult,
     Metric,
+    SealedTestAccuracy,
+    compute_family_variation,
 )
 from joinless.runrecord import (
     ArmResult,
@@ -84,6 +86,24 @@ def _ok_report() -> EvaluationReport:
         precision=metric, recall=metric, f1=metric, derivation="pooled"
     )
     return EvaluationReport(per_family=(family,), aggregate=aggregate, n_pairs=1)
+
+
+def _ok_accuracy() -> SealedTestAccuracy:
+    """A minimal, valid :class:`SealedTestAccuracy` (issue #97) — one seed's
+    report standing in for both the pooled figure and its own by-seed entry,
+    with the real :func:`compute_family_variation` behind it, so every test
+    below that only needs *an* ok accuracy value gets one that could not
+    have been constructed if the pooled-without-variation invariant were
+    violated."""
+    report = _ok_report()
+    by_seed = {1: report}
+    return SealedTestAccuracy(
+        pooled=report,
+        pooled_answers="what the pooled figure answers in this test",
+        by_seed=by_seed,
+        variation=compute_family_variation(by_seed),
+        by_seed_answers="what the per-seed figures answer in this test",
+    )
 
 
 def test_a_present_maybe_carries_no_reason() -> None:
@@ -239,7 +259,7 @@ def _unavailable(arm: str) -> Unavailable:
 
 def _arm_result() -> ArmResult:
     return ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
@@ -294,7 +314,7 @@ def test_a_built_record_carries_the_expected_winners_given_at_construction() -> 
     )
 
     assert record.expected_winners.winners == {"exact": "overlap"}
-    assert isinstance(record.results["overlap"].accuracy, EvaluationReport)
+    assert isinstance(record.results["overlap"].accuracy, SealedTestAccuracy)
 
 
 # --- RunAssembly: contradictions are persisted, never recomputed (ADR-0011 rule 4,
@@ -660,7 +680,29 @@ def test_record_to_dict_tags_an_ok_accuracy_report_with_its_status() -> None:
 
     accuracy = payload["results"]["overlap"]["accuracy"]
     assert accuracy["status"] == "ok"
-    assert accuracy["per_family"][0]["family"] == "exact"
+    assert accuracy["pooled"]["per_family"][0]["family"] == "exact"
+
+
+def test_record_to_dict_renders_the_pooled_figure_alongside_its_seed_variation() -> (
+    None
+):
+    """Issue #97: per-family results reported per seed, not only pooled, and
+    the seed-to-seed variation stated as a figure — both present on the same
+    ``accuracy`` value a pooled figure is read from, each stating which
+    question it answers (issue #97's third bullet)."""
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    accuracy = payload["results"]["overlap"]["accuracy"]
+    assert accuracy["by_seed"]["1"]["per_family"][0]["family"] == "exact"
+    assert accuracy["variation"][0]["family"] == "exact"
+    assert accuracy["pooled_answers"]
+    assert accuracy["by_seed_answers"]
+    # The nested per-seed/pooled reports are not themselves re-tagged with a
+    # second "status" — only the ADR-0013 either/or slot itself (this
+    # ``accuracy`` value against ``InvalidRun``) carries that tag.
+    assert "status" not in accuracy["pooled"]
 
 
 def test_record_to_dict_tags_an_invalid_accuracy_report_with_its_status() -> None:
@@ -704,7 +746,7 @@ def test_record_to_dict_tags_an_ok_preparation_comparison_with_its_status() -> N
     from joinless.runrecord import PreparationComparison
 
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
@@ -729,7 +771,7 @@ def test_record_to_dict_tags_an_unavailable_preparation_comparison_with_its_stat
     None
 ):
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("embed-int8"),
         peak_memory=_unavailable("embed-int8"),
         cold_start=_unavailable("embed-int8"),
@@ -753,7 +795,7 @@ def test_record_to_dict_tags_an_ok_preparation_cost_with_its_status() -> None:
     from joinless.measurement import PreparationCost
 
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
@@ -784,7 +826,7 @@ def test_record_to_dict_tags_an_ok_preparation_cost_with_its_status() -> None:
 
 def test_record_to_dict_tags_an_unavailable_preparation_cost_with_its_status() -> None:
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("embed-int8"),
         peak_memory=_unavailable("embed-int8"),
         cold_start=_unavailable("embed-int8"),
@@ -865,7 +907,7 @@ def test_record_to_dict_renders_a_defined_artifact_size_metric_with_no_status_wr
     ``Metric`` renders everywhere else it is nested (e.g. inside an accuracy
     report's ``precision``), with no ``status`` key added."""
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("embed-fp32"),
         peak_memory=_unavailable("embed-fp32"),
         cold_start=_unavailable("embed-fp32"),
@@ -923,7 +965,7 @@ def test_record_to_dict_renders_a_frozenset_as_a_sorted_list() -> None:
         not_attributable=frozenset({"interpreter start"}),
     )
     result = ArmResult(
-        accuracy=_ok_report(),
+        accuracy=_ok_accuracy(),
         warm_latency=_unavailable("overlap"),
         peak_memory=_unavailable("overlap"),
         cold_start=cold_start,
@@ -1062,7 +1104,7 @@ def test_write_record_never_overwrites_an_existing_record(tmp_path: Path) -> Non
 
     second = _record_with(
         ArmResult(
-            accuracy=_ok_report(),
+            accuracy=_ok_accuracy(),
             warm_latency=_unavailable("a different arm entirely"),
             peak_memory=_unavailable("overlap"),
             cold_start=_unavailable("overlap"),

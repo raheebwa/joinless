@@ -269,14 +269,14 @@ from types import MappingProxyType
 from joinless.corpus import Corpus
 
 
-def _corpus(pairs_by_role: dict) -> Corpus:  # type: ignore[type-arg]
+def _corpus(pairs_by_role: dict, seed: int = 1) -> Corpus:  # type: ignore[type-arg]
     pairs = tuple(pair for pairs in pairs_by_role.values() for pair in pairs)
     roles = {
         pair.pair_id: role
         for role, role_pairs in pairs_by_role.items()
         for pair in role_pairs
     }
-    return Corpus(seed=1, pairs=pairs, roles=MappingProxyType(roles))
+    return Corpus(seed=seed, pairs=pairs, roles=MappingProxyType(roles))
 
 
 def test_select_threshold_reads_calibration_pairs_only() -> None:
@@ -966,3 +966,297 @@ def test_accuracy_divergence_is_undefined_when_the_candidate_never_reported_the_
     assert missing.candidate_f1.undefined_reason is not None
     assert "near-miss negative" in missing.candidate_f1.undefined_reason
     assert missing.delta_f1.value is None
+
+
+# --- per-seed accuracy and its variation (ADR-0011 rule 3, issue #97) --------------
+
+import statistics
+
+
+def _pool(corpora: list) -> Corpus:  # type: ignore[type-arg]
+    """Combine several seeds' corpora into one, mirroring exactly what
+    ``joinless.cli._pool_corpora`` does to the real corpus (pairs and roles
+    unioned, no id collision because every seed's pair ids already carry
+    that seed as a prefix) — a fixture, not a second implementation under
+    test: ``joinless.cli``'s own suite is what pins that function's
+    behaviour, this only builds a valid ``Corpus`` of the shape
+    :func:`~joinless.evaluation.evaluate_sealed_test_with_variation` expects
+    a pooled corpus to have.
+    """
+    pairs = tuple(pair for corpus in corpora for pair in corpus.pairs)
+    roles: dict = {}  # type: ignore[type-arg]
+    for corpus in corpora:
+        roles.update(corpus.roles)
+    return Corpus(seed=corpora[0].seed, pairs=pairs, roles=MappingProxyType(roles))
+
+
+def test_compute_family_variation_reports_the_seed_to_seed_stdev_per_family() -> None:
+    from joinless.evaluation import compute_family_variation
+
+    seed_10 = _report_with_f1("exact", 2 / 3)
+    seed_20 = _report_with_f1("exact", 1.0)
+
+    [variation] = compute_family_variation({10: seed_10, 20: seed_20})
+
+    assert variation.family == "exact"
+    assert variation.f1.value == pytest.approx(statistics.stdev([2 / 3, 1.0]))
+    assert variation.f1.undefined_reason is None
+
+
+def test_compute_family_variation_is_undefined_with_fewer_than_two_defined_seeds() -> (
+    None
+):
+    """A single defined value has no spread to report — reporting ``0.0``
+    would claim stability nothing measured (ADR-0013's "undefined is not
+    zero" rule, applied to a spread rather than a ratio)."""
+    from joinless.evaluation import compute_family_variation
+
+    defined = _report_with_f1("exact", 1.0)
+    undefined_row = _multi_family_report({"exact": None})
+
+    [variation] = compute_family_variation({10: defined, 20: undefined_row})
+
+    assert variation.f1.value is None
+    assert variation.f1.undefined_reason is not None
+    assert "1 of 2" in variation.f1.undefined_reason
+
+
+def test_compute_family_variation_rejects_an_empty_mapping() -> None:
+    from joinless.evaluation import compute_family_variation
+
+    with pytest.raises(ValueError, match="at least one seed"):
+        compute_family_variation({})
+
+
+def test_compute_family_variation_rejects_seeds_reporting_different_families() -> None:
+    from joinless.evaluation import compute_family_variation
+
+    first = _report_with_f1("exact", 1.0)
+    second = _report_with_f1("abbreviation", 1.0)
+
+    with pytest.raises(ValueError, match="do not match"):
+        compute_family_variation({10: first, 20: second})
+
+
+def test_compute_family_variation_preserves_the_lowest_seeds_family_order() -> None:
+    from joinless.evaluation import compute_family_variation
+
+    ordered = _multi_family_report({"transliteration": 1.0, "exact": 1.0})
+    other = _multi_family_report({"transliteration": 1.0, "exact": 1.0})
+
+    variations = compute_family_variation({20: other, 10: ordered})
+
+    assert [row.family for row in variations] == ["transliteration", "exact"]
+
+
+# --- SealedTestAccuracy: a pooled figure never travels without its variation -------
+
+
+def test_sealed_test_accuracy_requires_at_least_one_seed_report() -> None:
+    from joinless.evaluation import SealedTestAccuracy
+
+    pooled = _multi_family_report({"exact": 1.0})
+
+    with pytest.raises(ValueError, match="at least one seed"):
+        SealedTestAccuracy(
+            pooled=pooled,
+            pooled_answers="answers",
+            by_seed={},
+            variation=(),
+            by_seed_answers="answers",
+        )
+
+
+def test_sealed_test_accuracy_rejects_a_pooled_report_missing_its_variation() -> None:
+    """Issue #97's fourth bullet: a run must not be able to report a pooled
+    figure without the seed-to-seed variation behind it. ``variation=()``
+    here is exactly that — a pooled report naming a family with no
+    corresponding row in ``variation`` — and construction refuses it rather
+    than accepting a record a reader could mistake for one where every
+    pooled family's variation was reported."""
+    from joinless.evaluation import SealedTestAccuracy
+
+    pooled = _multi_family_report({"exact": 1.0})
+    by_seed = {10: _multi_family_report({"exact": 1.0})}
+
+    with pytest.raises(ValueError, match="variation"):
+        SealedTestAccuracy(
+            pooled=pooled,
+            pooled_answers="answers",
+            by_seed=by_seed,
+            variation=(),
+            by_seed_answers="answers",
+        )
+
+
+def test_sealed_test_accuracy_accepts_variation_covering_every_pooled_family() -> None:
+    from joinless.evaluation import SealedTestAccuracy, compute_family_variation
+
+    pooled = _multi_family_report({"exact": 1.0})
+    by_seed = {10: _multi_family_report({"exact": 1.0})}
+
+    accuracy = SealedTestAccuracy(
+        pooled=pooled,
+        pooled_answers="what the pooled figure answers",
+        by_seed=by_seed,
+        variation=compute_family_variation(by_seed),
+        by_seed_answers="what the per-seed figures answer",
+    )
+
+    assert accuracy.pooled is pooled
+    assert accuracy.by_seed == by_seed
+
+
+def test_sealed_test_accuracy_names_which_question_pooled_answers() -> None:
+    """Issue #97's third bullet: the record states which question each
+    number answers. Pinned by content, not by importing the constant that
+    produces it — a test comparing a value against the same constant the
+    code uses cannot see a content change (the same rule
+    ``test_select_threshold_records_the_literal_selection_procedure_text``
+    already applies to the threshold-selection procedure text)."""
+    from joinless.evaluation import SealedTestAccuracy, compute_family_variation
+
+    pooled = _multi_family_report({"exact": 1.0})
+    by_seed = {10: _multi_family_report({"exact": 1.0})}
+
+    accuracy = SealedTestAccuracy(
+        pooled=pooled,
+        pooled_answers=(
+            "what this arm scores across every seed's sealed-test pairs, "
+            "pooled into one split and scored together under the one "
+            "threshold ADR-0011 rule 2 selects from pooled calibration data "
+            "— the reported headline RFC-0002's splits table calls the "
+            "sealed test's result"
+        ),
+        by_seed=by_seed,
+        variation=compute_family_variation(by_seed),
+        by_seed_answers=(
+            "what this arm scores on each seed's own sealed-test split "
+            "alone, under that identical threshold and procedure — whether "
+            "the pooled figure above depends on one draw or holds across "
+            "the corpus's several deterministic seeds (ADR-0011 rule 3)"
+        ),
+    )
+
+    assert accuracy.pooled_answers == (
+        "what this arm scores across every seed's sealed-test pairs, "
+        "pooled into one split and scored together under the one "
+        "threshold ADR-0011 rule 2 selects from pooled calibration data "
+        "— the reported headline RFC-0002's splits table calls the "
+        "sealed test's result"
+    )
+    assert accuracy.by_seed_answers == (
+        "what this arm scores on each seed's own sealed-test split "
+        "alone, under that identical threshold and procedure — whether "
+        "the pooled figure above depends on one draw or holds across "
+        "the corpus's several deterministic seeds (ADR-0011 rule 3)"
+    )
+
+
+# --- evaluate_sealed_test_with_variation: pooled and per-seed, one threshold -------
+
+
+def test_evaluate_sealed_test_with_variation_reports_pooled_and_each_seed() -> None:
+    from joinless.evaluation import (
+        evaluate_sealed_test_with_variation,
+        freeze_threshold,
+    )
+
+    scores = {
+        ("CL", "CR"): 1.0,
+        ("A1", "B1"): 1.0,
+        ("A2", "B2"): 0.5,
+        ("C1", "D1"): 1.0,
+        ("C2", "D2"): 1.0,
+    }
+    scorer = _FixedScorer(scores)
+
+    seed_10 = _corpus(
+        {
+            "calibration": [_pair("10-c1", "CL", "CR", 1, "exact")],
+            "sealed test": [
+                _pair("10-s1", "A1", "B1", 1, "exact"),
+                _pair("10-s2", "A2", "B2", 1, "exact"),
+            ],
+        },
+        seed=10,
+    )
+    seed_20 = _corpus(
+        {
+            "calibration": [_pair("20-c1", "CL", "CR", 1, "exact")],
+            "sealed test": [
+                _pair("20-s1", "C1", "D1", 1, "exact"),
+                _pair("20-s2", "C2", "D2", 1, "exact"),
+            ],
+        },
+        seed=20,
+    )
+    pooled_corpus = _pool([seed_10, seed_20])
+    from joinless.evaluation import select_threshold
+
+    frozen = freeze_threshold(select_threshold(pooled_corpus, scorer))
+    assert frozen.value == 1.0
+
+    accuracy = evaluate_sealed_test_with_variation(
+        corpora=[seed_10, seed_20],
+        pooled=pooled_corpus,
+        scorer=scorer,
+        frozen=frozen,
+    )
+
+    from joinless.evaluation import SealedTestAccuracy
+
+    assert isinstance(accuracy, SealedTestAccuracy)
+
+    [pooled_exact] = accuracy.pooled.per_family
+    assert pooled_exact.true_positives == 3
+    assert pooled_exact.predicted_positives == 3
+    assert pooled_exact.actual_positives == 4
+    assert pooled_exact.recall.value == pytest.approx(0.75)
+
+    assert set(accuracy.by_seed) == {10, 20}
+    [seed_10_exact] = accuracy.by_seed[10].per_family
+    assert seed_10_exact.f1.value == pytest.approx(2 / 3)
+    [seed_20_exact] = accuracy.by_seed[20].per_family
+    assert seed_20_exact.f1.value == pytest.approx(1.0)
+
+    [variation] = accuracy.variation
+    assert variation.family == "exact"
+    assert variation.f1.value == pytest.approx(statistics.stdev([2 / 3, 1.0]))
+
+
+def test_evaluate_sealed_test_with_variation_propagates_a_contaminated_threshold() -> (
+    None
+):
+    """A threshold that saw sealed-test data is reported ``invalid`` for the
+    whole arm, exactly as :func:`~joinless.evaluation.evaluate_sealed_test`
+    already reports it for the pooled split alone (ADR-0013) — no per-seed
+    figure is computed from a threshold the protocol has already rejected."""
+    from joinless.evaluation import (
+        InvalidRun,
+        SelectedThreshold,
+        evaluate_sealed_test_with_variation,
+        freeze_threshold,
+    )
+
+    calibration = [_pair("c1", "Acme Traders", "Acme Traders", 1, "exact")]
+    sealed_test = [_pair("s1", "Acme Traders", "Acme Traders", 1, "exact")]
+    seed_corpus = _corpus(
+        {"calibration": calibration, "sealed test": sealed_test}, seed=10
+    )
+    scorer = OverlapScorer()
+    contaminated = SelectedThreshold(
+        scorer_name="overlap",
+        value=0.5,
+        procedure="a procedure",
+        role="sealed test",
+        n_pairs=1,
+    )
+    frozen = freeze_threshold(contaminated)
+
+    result = evaluate_sealed_test_with_variation(
+        corpora=[seed_corpus], pooled=seed_corpus, scorer=scorer, frozen=frozen
+    )
+
+    assert isinstance(result, InvalidRun)
+    assert "sealed test" in result.reason

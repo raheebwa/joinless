@@ -712,7 +712,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v4"
+    assert record["schema"] == "benchmark-v5"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -769,7 +769,7 @@ def test_benchmark_records_a_real_measured_result_for_a_registered_arm(
 
     accuracy = record["results"]["overlap"]["accuracy"]
     assert accuracy["status"] == "ok"
-    assert accuracy["per_family"]
+    assert accuracy["pooled"]["per_family"]
 
     warm_latency = record["results"]["overlap"]["warm_latency"]
     assert warm_latency["status"] == "ok"
@@ -784,6 +784,35 @@ def test_benchmark_records_a_real_measured_result_for_a_registered_arm(
     cold_start = record["results"]["fuzzy"]["cold_start"]
     assert cold_start["status"] == "ok"
     assert cold_start["session_creation"]["value"] is None
+
+
+def test_benchmark_reports_per_seed_accuracy_and_its_variation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #97: per-family results are reported per seed, not only pooled,
+    and the seed-to-seed variation is stated as a figure — proven end to end
+    through the real command, with the corpus shrunk to two seeds rather
+    than the suite's usual one (issue #45's TDD bullet) so there is a
+    second seed for the first to differ from."""
+    from joinless import corpus as corpus_module
+    from joinless.cli import main
+
+    monkeypatch.setattr(corpus_module, "SEEDS", (1, 2))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+    assert exit_code == 0
+
+    written = list((tmp_path / "benchmarks").glob("*.json"))
+    assert len(written) == 1
+    record = json.loads(written[0].read_text(encoding="utf-8"))
+
+    accuracy = record["results"]["overlap"]["accuracy"]
+    assert accuracy["status"] == "ok"
+    assert set(accuracy["by_seed"]) == {"1", "2"}
+    assert accuracy["variation"]
+    assert accuracy["pooled_answers"]
+    assert accuracy["by_seed_answers"]
 
 
 def test_benchmark_records_both_preparation_paths_and_they_agree(
@@ -1474,6 +1503,8 @@ from joinless.evaluation import (
     FamilyResult,
     InvalidRun,
     Metric,
+    SealedTestAccuracy,
+    compute_family_variation,
 )
 from joinless.measurement import PreparationCost, Unavailable
 from joinless.runrecord import ArmResult, BucketOccupancy
@@ -1503,9 +1534,29 @@ def _report_with_f1(f1_value: float) -> EvaluationReport:
 def _result_with_accuracy(
     arm: str, accuracy: EvaluationReport | InvalidRun
 ) -> ArmResult:
+    """Wrap ``accuracy`` — a bare :class:`EvaluationReport`, the shape every
+    caller in this section already builds via :func:`_report_with_f1` — into
+    the :class:`SealedTestAccuracy` :class:`ArmResult.accuracy` now requires
+    (issue #97), or pass an :class:`InvalidRun` straight through unchanged.
+    One seed standing in for both the pooled figure and its own by-seed
+    entry is enough here: these tests exercise contradictions and int8
+    divergence, both of which read only ``accuracy.pooled`` (``joinless.cli``
+    module), never ``by_seed`` or ``variation``."""
     unavailable = Unavailable(arm=arm, reason="not measured in this test")
+    resolved_accuracy: SealedTestAccuracy | InvalidRun
+    if isinstance(accuracy, InvalidRun):
+        resolved_accuracy = accuracy
+    else:
+        by_seed = {1: accuracy}
+        resolved_accuracy = SealedTestAccuracy(
+            pooled=accuracy,
+            pooled_answers="what the pooled figure answers in this test",
+            by_seed=by_seed,
+            variation=compute_family_variation(by_seed),
+            by_seed_answers="what the per-seed figures answer in this test",
+        )
     return ArmResult(
-        accuracy=accuracy,
+        accuracy=resolved_accuracy,
         warm_latency=unavailable,
         peak_memory=unavailable,
         cold_start=unavailable,
@@ -2224,10 +2275,10 @@ sys.exit(cli.main({argv!r}))
 
 def test_the_schema_tag_names_one_transition_from_the_last_published_version() -> None:
     """The persisted shape changed several times across this branch's work, but
-    only ``benchmark-v3`` was ever written into a record anyone can hold. A tag
+    only ``benchmark-v4`` was ever written into a record anyone can hold. A tag
     that counted intermediate, uncommitted steps would imply versions that never
     existed to read.
     """
     from joinless.cli import _SCHEMA
 
-    assert _SCHEMA == "benchmark-v4"
+    assert _SCHEMA == "benchmark-v5"
