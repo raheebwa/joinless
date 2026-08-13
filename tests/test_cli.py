@@ -882,15 +882,23 @@ def test_benchmark_records_preparation_cost_for_a_registered_arm(
     """Issue #66's first bullet: "hoisted and naive preparation cost are
     recorded per arm" - measured in an isolated worker (RFC-0002 Method
     step 7), over the exact candidate set whose occupancy this run also
-    reports (ADR-0009)."""
+    reports (ADR-0009). Issue #103: reported as p50/p99 over repeated
+    warmed-up samples, with the counts that produced them travelling on
+    the same value, the same shape ``warm_latency`` already carries."""
+    from joinless import cli as cli_module
+
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
     for arm in ("overlap", "fuzzy"):
         cost = record["results"][arm]["preparation_cost"]
         assert cost["status"] == "ok"
         assert cost["arm"] == arm
-        assert cost["hoisted_seconds"] >= 0.0
-        assert cost["naive_seconds"] >= 0.0
+        assert cost["hoisted_p50_seconds"] >= 0.0
+        assert cost["hoisted_p99_seconds"] >= cost["hoisted_p50_seconds"]
+        assert cost["naive_p50_seconds"] >= 0.0
+        assert cost["naive_p99_seconds"] >= cost["naive_p50_seconds"]
+        assert cost["warmup_count"] == cli_module._WARMUP_COUNT
+        assert cost["repetition_count"] == cli_module._REPETITION_COUNT
         assert cost["record_count"] == 20
         assert cost["comparison_count"] == 30
 
@@ -1696,10 +1704,19 @@ def test_int8_accuracy_divergence_is_absent_with_a_reason_when_neither_arm_ran()
 
 
 def _cost(arm: str, *, hoisted_seconds: float, naive_seconds: float) -> PreparationCost:
+    """A ``PreparationCost`` whose median equals ``hoisted_seconds``/
+    ``naive_seconds`` and whose p99 equals its own p50 — these fixtures
+    exist to drive ``_hoist_speedup`` and ``_preparation_asymmetry``, both
+    of which read only the median (issue #103), so the tail figure is set
+    to a fixed, valid value rather than exercised here."""
     return PreparationCost(
         arm=arm,
-        hoisted_seconds=hoisted_seconds,
-        naive_seconds=naive_seconds,
+        hoisted_p50_seconds=hoisted_seconds,
+        hoisted_p99_seconds=hoisted_seconds,
+        naive_p50_seconds=naive_seconds,
+        naive_p99_seconds=naive_seconds,
+        warmup_count=5,
+        repetition_count=20,
         record_count=20,
         comparison_count=30,
     )
@@ -1837,7 +1854,9 @@ def test_format_preparation_asymmetry_reports_no_arm_when_both_groups_are_empty(
         )
     )
 
-    assert lines[0] == "preparation hoist speed-up (naive seconds / hoisted seconds):"
+    assert lines[0] == (
+        "preparation hoist speed-up (median naive seconds / median hoisted seconds):"
+    )
     assert any("candidate-bucket occupancy" in line for line in lines)
     assert any("classical: no arm" in line for line in lines)
     assert any("neural: no arm" in line for line in lines)

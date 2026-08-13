@@ -329,6 +329,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 # ADR-0013 "unavailable" case rather than a stub.
 _ARMS: tuple[str, ...] = ("overlap", "fuzzy", "embed-fp32", "embed-int8")
 
+# One warm-up/repetition budget for every repeated-sample metric this run takes —
+# warm scoring latency and, since issue #103, preparation cost — not a second pair
+# invented for preparation cost specifically. `Environment` already records exactly
+# one `warmup_count`/`repetition_count` as a run-wide methodology fact (that type's
+# own docstring), which only holds if every metric it describes actually used the
+# same counts; a per-metric count would make that single field ambiguous about
+# which metric it was describing. It is also proportionate for both arm families
+# measured, not just convenient: a real run's own preparation-cost figures show
+# embed-fp32's naive path costing on the order of tens of milliseconds for the
+# whole shared sample, so 25 total passes (5 discarded, 20 timed) add on the order
+# of a second per neural arm — negligible next to that arm's own cold-start and
+# accuracy measurement already in the same run — while the classical arms' cost is
+# already microseconds, where 25 passes add nothing perceptible either way.
 _WARMUP_COUNT = 5
 _REPETITION_COUNT = 20
 
@@ -361,6 +374,15 @@ _REPETITION_COUNT = 20
 # travels without the spread that says whether it depends on one draw. A new
 # required shape on every arm's accuracy result is the same breaking change the
 # v2 -> v3 comment above already names the policy for.
+#
+# Still v5, not a further transition: `results.<arm>.preparation_cost` also changed
+# shape while v5 was unpublished (issue #103) - `hoisted_seconds`/`naive_seconds`
+# (a single untimed draw of each path) became `hoisted_p50_seconds`/
+# `hoisted_p99_seconds`/`naive_p50_seconds`/`naive_p99_seconds` plus its own
+# `warmup_count`/`repetition_count`, the same repeated-sample shape
+# `results.<arm>.warm_latency` already used. This branch makes exactly one
+# transition from the last published schema no matter how many shapes it passes
+# through before that transition is published.
 _SCHEMA = "benchmark-v5"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
@@ -854,7 +876,12 @@ def _measure_arm(
     artifact_size = measure_artifact_size(get_artifact_paths(arm))
     preparation = _preparation_comparison(scorer, frozen.value, left_name, right_name)
     preparation_cost = measure_preparation_cost(
-        arm, sample.left_names, sample.right_names, sample.comparison_pairs
+        arm,
+        sample.left_names,
+        sample.right_names,
+        sample.comparison_pairs,
+        warmup_count=_WARMUP_COUNT,
+        repetition_count=_REPETITION_COUNT,
     )
     return (
         ArmResult(
@@ -975,18 +1002,27 @@ def _hoist_speedup(cost: PreparationCost) -> Metric:
     arm's own :class:`~joinless.measurement.PreparationCost` (issue #66's
     third bullet).
 
-    Undefined, not infinite, when ``hoisted_seconds`` measured at ``0.0`` —
-    a real possibility for the cheapest classical arms on a coarse clock —
-    the same "undefined is not zero" rule ADR-0013 states everywhere else a
-    figure in this run record might not be computable.
+    Computed from each path's median (``..._p50_seconds``), not a single
+    draw of either — issue #103's finding is that a single sample of this
+    figure is noise large enough to flip which arm looks faster (seven
+    direct samples at a smaller workload gave ratios from 0.89 to 1.14).
+    The median is the typical cost a reader comparing arms wants, the same
+    figure RFC-0002's Metrics table already treats as the headline number
+    for warm scoring; the ratio of two medians is the typical speed-up, not
+    the speed-up of one lucky (or unlucky) pair of draws.
+
+    Undefined, not infinite, when ``hoisted_p50_seconds`` measured at
+    ``0.0`` — a real possibility for the cheapest classical arms on a
+    coarse clock — the same "undefined is not zero" rule ADR-0013 states
+    everywhere else a figure in this run record might not be computable.
     """
-    if cost.hoisted_seconds <= 0.0:
+    if cost.hoisted_p50_seconds <= 0.0:
         return Metric(
             value=None,
             undefined_reason="hoisted preparation measured at 0 seconds",
         )
     return Metric(
-        value=cost.naive_seconds / cost.hoisted_seconds, undefined_reason=None
+        value=cost.naive_p50_seconds / cost.hoisted_p50_seconds, undefined_reason=None
     )
 
 
@@ -1050,10 +1086,15 @@ def _format_preparation_asymmetry(asymmetry: PreparationAsymmetry) -> list[str]:
     not invent a threshold; it hands the reader the one number ADR-0009's
     claim is about and the direction the claim predicts, and lets them judge
     it against whatever occupancy their own dataset has.
+
+    Labelled "median" (issue #103): each speed-up is now a ratio of two
+    medians over repeated, warmed-up samples, not the ratio of two single
+    draws, and the printed line says so rather than implying a precision
+    the underlying figure no longer claims for itself.
     """
     occupancy = asymmetry.occupancy
     lines = [
-        "preparation hoist speed-up (naive seconds / hoisted seconds):",
+        "preparation hoist speed-up (median naive seconds / median hoisted seconds):",
         (
             f"  measured over candidate-bucket occupancy {list(occupancy.counts)} "
             f"(max {occupancy.max_occupancy}, cell size {occupancy.cell_size_degrees} "
