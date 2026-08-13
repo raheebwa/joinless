@@ -592,7 +592,7 @@ def _run_benchmark_with_small_corpus(
 
     Returns the one record written, parsed from JSON.
     """
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -619,7 +619,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 def test_benchmark_prints_the_path_it_wrote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -714,7 +714,7 @@ def test_benchmark_records_the_cpu_count_os_actually_reports(
 ) -> None:
     import os
 
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -734,7 +734,7 @@ def test_benchmark_records_total_memory_bytes_from_os_sysconf(
 ) -> None:
     import os
 
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -754,7 +754,7 @@ def test_benchmark_records_total_memory_bytes_from_os_sysconf(
 def test_benchmark_records_the_python_version_platform_actually_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -772,7 +772,7 @@ def test_benchmark_records_the_python_version_platform_actually_reports(
 def test_benchmark_records_the_system_platform_actually_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import joinless.corpus as corpus_module
+    from joinless import corpus as corpus_module
     from joinless.cli import main
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
@@ -790,8 +790,8 @@ def test_benchmark_records_the_system_platform_actually_reports(
 def test_benchmark_records_the_power_mode_detect_power_mode_actually_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import joinless.cli as cli_module
-    import joinless.corpus as corpus_module
+    from joinless import cli as cli_module
+    from joinless import corpus as corpus_module
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
     monkeypatch.setattr(cli_module, "_detect_power_mode", lambda: "battery")
@@ -960,8 +960,8 @@ def test_benchmark_persists_the_same_contradictions_it_prints(
     (issue #50: "two answers that can disagree") - this pins the printed
     output and the persisted ``contradictions`` field to the same computed
     value by forcing what that value is."""
-    import joinless.cli as cli_module
-    import joinless.corpus as corpus_module
+    from joinless import cli as cli_module
+    from joinless import corpus as corpus_module
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
     monkeypatch.chdir(tmp_path)
@@ -988,8 +988,8 @@ def test_benchmark_persists_the_same_contradictions_it_prints(
 def test_benchmark_prints_when_no_expectation_broke(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import joinless.cli as cli_module
-    import joinless.corpus as corpus_module
+    from joinless import cli as cli_module
+    from joinless import corpus as corpus_module
 
     monkeypatch.setattr(corpus_module, "SEEDS", (1,))
     monkeypatch.chdir(tmp_path)
@@ -1017,8 +1017,8 @@ def test_benchmark_reports_a_same_identifier_collision_without_a_traceback(
     unhandled ``FileExistsError`` traceback."""
     import datetime as datetime_module
 
-    import joinless.cli as cli_module
-    import joinless.corpus as corpus_module
+    from joinless import cli as cli_module
+    from joinless import corpus as corpus_module
 
     class _FixedDatetime(datetime_module.datetime):
         @classmethod
@@ -1054,11 +1054,11 @@ socket.socket = _blocked
 socket.create_connection = _blocked
 socket.getaddrinfo = _blocked
 
-import joinless.corpus as corpus
+from joinless import corpus as corpus
 corpus.SEEDS = (1,)
 
 import sys
-import joinless.cli as cli
+from joinless import cli as cli
 sys.exit(cli.main(["benchmark"]))
 """
 
@@ -1155,7 +1155,7 @@ def test_detect_power_mode_dispatches_to_pmset_on_darwin(
 def test_detect_power_mode_dispatches_to_the_linux_supply_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import joinless.cli as cli_module
+    from joinless import cli as cli_module
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(cli_module, "_LINUX_POWER_SUPPLY_DIR", tmp_path)
@@ -1216,6 +1216,6 @@ socket.socket = _blocked
 socket.create_connection = _blocked
 socket.getaddrinfo = _blocked
 
-import joinless.cli as cli
+from joinless import cli as cli
 sys.exit(cli.main({argv!r}))
 """
