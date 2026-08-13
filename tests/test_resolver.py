@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from hypothesis import assume, example, given
@@ -20,6 +20,7 @@ from joinless.resolver import (
     _REASON_NOT_SELECTED,
     DEFAULT_CELL_SIZE_DEGREES,
     ResolutionResult,
+    ScoredComparisons,
     _haversine_km,
     _populatedness,
     _winner,
@@ -27,8 +28,9 @@ from joinless.resolver import (
     candidate_pairs,
     merge,
     resolve,
+    score_candidates,
 )
-from joinless.scoring import FuzzyScorer, OverlapScorer, ThresholdMatcher
+from joinless.scoring import FuzzyScorer, OverlapScorer, Scorer, ThresholdMatcher
 
 
 def _record(
@@ -860,6 +862,194 @@ def test_swapping_in_the_embedding_arm_changes_which_pairs_match_and_nothing_els
         == untouchable_embedding.reason
         == _REASON_NO_COORDINATES
     )
+
+
+# --- Naive vs hoisted preparation, selectable for a run (issue #65) ----------------
+
+# Three left records against two right records, all sharing one grid cell
+# (cell_size=1.0 keeps every coordinate in it): candidate_pairs() then produces six
+# pairs from five distinct records, so a record recurs across several comparisons.
+# Without that overlap hoisted and naive preparation would cost the same, and the
+# call-count test below would prove nothing about the redundancy ADR-0009 describes.
+_REDUNDANT_LEFT = [
+    _record("left", 0, "Acme Traders", latitude=0.0, longitude=0.0),
+    _record("left", 1, "Acme Trading Co", latitude=0.0, longitude=0.0),
+    _record("left", 2, "Rocket Fuel Traders", latitude=0.0, longitude=0.0),
+]
+_REDUNDANT_RIGHT = [
+    _record("right", 0, "Acme Traders Ltd", latitude=0.0, longitude=0.0),
+    _record("right", 1, "Zephyr Logistics", latitude=0.0, longitude=0.0),
+]
+
+_CLASSICAL_SCORERS = [
+    pytest.param(OverlapScorer(), id="overlap"),
+    pytest.param(FuzzyScorer(), id="fuzzy"),
+]
+
+
+class _CallCountingScorer:
+    """Delegates every :class:`~joinless.scoring.Scorer` member to ``inner``
+    while counting how many times ``prepare`` and ``prepare_all`` are each
+    called directly on *this* object - not however many times ``inner``'s own
+    ``prepare_all`` happens to call ``prepare`` internally, which is a fact
+    about ``inner``'s implementation (issue #65's own guidance notes both
+    classical arms implement ``prepare_all`` as a loop over ``prepare``), not
+    about which call pattern :func:`score_candidates` itself used. Proving
+    the *call pattern* differs between the two preparation paths - not merely
+    that the two paths happen to carry different names - is the whole point
+    of this fake.
+    """
+
+    def __init__(self, inner: OverlapScorer) -> None:
+        self._inner = inner
+        self.prepare_calls = 0
+        self.prepare_all_calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def prepare_all(self, names: Sequence[str | None]) -> list[frozenset[str]]:
+        self.prepare_all_calls += 1
+        return self._inner.prepare_all(names)
+
+    def prepare(self, name: str | None) -> frozenset[str]:
+        self.prepare_calls += 1
+        return self._inner.prepare(name)
+
+    def score(self, a: frozenset[str], b: frozenset[str]) -> float:
+        return self._inner.score(a, b)
+
+
+def test_score_candidates_requires_an_explicit_preparation_path() -> None:
+    """Issue #65's third bullet, enforced structurally: there is no call to
+    ``score_candidates`` that omits which strategy produced its scores -
+    mirroring how :class:`~joinless.runrecord.RunAssembly` requires
+    ``expected_winners`` up front for the same "not by accident" reason."""
+    with pytest.raises(TypeError):
+        score_candidates(  # type: ignore[call-arg]
+            _REDUNDANT_LEFT, _REDUNDANT_RIGHT, _OVERLAP_MATCHER, cell_size=1.0
+        )
+
+
+def test_score_candidates_rejects_an_unrecognised_preparation_path() -> None:
+    with pytest.raises(ValueError, match="preparation"):
+        score_candidates(
+            _REDUNDANT_LEFT,
+            _REDUNDANT_RIGHT,
+            _OVERLAP_MATCHER,
+            preparation="fast",  # type: ignore[arg-type]
+            cell_size=1.0,
+        )
+
+
+def test_hoisted_prepares_each_record_once_naive_prepares_once_per_comparison() -> None:
+    """The claim ADR-0009 makes, made into a real, selectable code path
+    rather than only equal-scoring output (issue #65's first bullet):
+    hoisted preparation calls ``prepare_all`` exactly once per side,
+    however many comparisons follow; naive preparation calls ``prepare``
+    fresh for both sides of every candidate pair, recomputing a record that
+    recurs across several comparisons that many times over."""
+    pairs = candidate_pairs(_REDUNDANT_LEFT, _REDUNDANT_RIGHT, cell_size=1.0)
+    assert len(pairs) == len(_REDUNDANT_LEFT) * len(_REDUNDANT_RIGHT)
+
+    hoisted_counter = _CallCountingScorer(OverlapScorer())
+    score_candidates(
+        _REDUNDANT_LEFT,
+        _REDUNDANT_RIGHT,
+        ThresholdMatcher(scorer=hoisted_counter, threshold=0.5),
+        preparation="hoisted",
+        cell_size=1.0,
+    )
+    assert hoisted_counter.prepare_all_calls == 2
+    assert hoisted_counter.prepare_calls == 0
+
+    naive_counter = _CallCountingScorer(OverlapScorer())
+    score_candidates(
+        _REDUNDANT_LEFT,
+        _REDUNDANT_RIGHT,
+        ThresholdMatcher(scorer=naive_counter, threshold=0.5),
+        preparation="naive",
+        cell_size=1.0,
+    )
+    assert naive_counter.prepare_all_calls == 0
+    assert naive_counter.prepare_calls == 2 * len(pairs)
+
+
+@pytest.mark.parametrize("scorer", _CLASSICAL_SCORERS)
+def test_naive_and_hoisted_paths_produce_identical_scores(scorer: Scorer[Any]) -> None:
+    """Issue #65's second bullet, for the two classical arms: a difference
+    here would mean the hoist changed what gets compared, not only how
+    cheaply - exactly the failure this test exists to catch."""
+    matcher = ThresholdMatcher(scorer=scorer, threshold=0.5)
+    hoisted: ScoredComparisons = score_candidates(
+        _REDUNDANT_LEFT, _REDUNDANT_RIGHT, matcher, preparation="hoisted", cell_size=1.0
+    )
+    naive: ScoredComparisons = score_candidates(
+        _REDUNDANT_LEFT, _REDUNDANT_RIGHT, matcher, preparation="naive", cell_size=1.0
+    )
+    assert hoisted.scores == naive.scores
+    assert hoisted.path == "hoisted"
+    assert naive.path == "naive"
+
+
+def test_naive_and_hoisted_paths_produce_identical_scores_for_the_embedding_arm() -> (
+    None
+):
+    """Issue #65's second bullet, for the arm the issue names explicitly:
+    "the classical arms barely benefit... that asymmetry is part of the
+    finding" - the embedding arm is where a preparation-path difference
+    would actually be expected to show up, so this is the test whose
+    failure would be the interesting one. Uses the same fixed-vector
+    embedding double the substitution-invariant test above already
+    established for :class:`EmbeddingScorer` - both ``embed-fp32`` and
+    ``embed-int8`` are this one class over different weights (RFC-0001), so
+    the same double stands in for either name.
+    """
+    vectors = {
+        "Acme Traders": (1.0, 0.0),
+        "Acme Trading Co": (1.0, 0.1),
+        "Rocket Fuel Traders": (0.0, 1.0),
+        "Acme Traders Ltd": (1.0, 0.0),
+        "Zephyr Logistics": (0.0, 1.0),
+    }
+    matcher = ThresholdMatcher(scorer=_fixed_embedding_scorer(vectors), threshold=0.5)
+    hoisted = score_candidates(
+        _REDUNDANT_LEFT, _REDUNDANT_RIGHT, matcher, preparation="hoisted", cell_size=1.0
+    )
+    naive = score_candidates(
+        _REDUNDANT_LEFT, _REDUNDANT_RIGHT, matcher, preparation="naive", cell_size=1.0
+    )
+    assert hoisted.scores == naive.scores
+
+
+def test_score_candidates_scores_align_with_candidate_pairs_order() -> None:
+    pairs = candidate_pairs(_REDUNDANT_LEFT, _REDUNDANT_RIGHT, cell_size=1.0)
+    result = score_candidates(
+        _REDUNDANT_LEFT,
+        _REDUNDANT_RIGHT,
+        _OVERLAP_MATCHER,
+        preparation="hoisted",
+        cell_size=1.0,
+    )
+    assert len(result.scores) == len(pairs)
+    expected = tuple(
+        _OVERLAP_MATCHER.scorer.score(
+            _OVERLAP_MATCHER.scorer.prepare(left.name),
+            _OVERLAP_MATCHER.scorer.prepare(right.name),
+        )
+        for left, right in pairs
+    )
+    assert result.scores == expected
+
+
+def test_score_candidates_with_no_candidate_pairs_returns_no_scores() -> None:
+    lonely = _record("left", 0, "No Neighbours", latitude=90.0, longitude=90.0)
+    result = score_candidates(
+        [lonely], [], _OVERLAP_MATCHER, preparation="naive", cell_size=1.0
+    )
+    assert result.scores == ()
+    assert result.path == "naive"
 
 
 # --- Property tests for the resolver invariants (issue #30) ------------------------

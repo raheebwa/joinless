@@ -188,6 +188,99 @@ def test_measure_warm_latency_runs_when_the_artifact_matches(tmp_path: Path) -> 
     assert not isinstance(result, Unavailable)
 
 
+# --- measure_preparation_cost(): hoisted vs naive, per arm, isolated (issue #66) ---
+
+from joinless.measurement import measure_preparation_cost
+
+
+def test_measure_preparation_cost_reports_both_paths_for_a_real_arm() -> None:
+    result = measure_preparation_cost(
+        "overlap",
+        ["Acme Traders", "Rocket Fuel Traders"],
+        ["Acme Traders Ltd", "Zephyr Logistics"],
+        [(0, 0), (0, 1), (1, 0), (1, 1)],
+    )
+
+    assert not isinstance(result, Unavailable)
+    assert result.arm == "overlap"
+    assert result.hoisted_seconds >= 0.0
+    assert result.naive_seconds >= 0.0
+    assert result.record_count == 4
+    assert result.comparison_count == 4
+
+
+def test_measure_preparation_cost_is_unavailable_for_an_arm_that_cannot_initialise() -> (
+    None
+):
+    result = measure_preparation_cost(
+        "embed-fp32",
+        ["Acme Traders"],
+        ["Acme Traders Ltd"],
+        [(0, 0)],
+    )
+
+    assert isinstance(result, Unavailable)
+    assert result.arm == "embed-fp32"
+    assert "embed-fp32" in result.reason
+
+
+def test_measure_preparation_cost_rejects_empty_left_names() -> None:
+    with pytest.raises(ValueError, match="left_names"):
+        measure_preparation_cost("overlap", [], ["Acme Traders Ltd"], [(0, 0)])
+
+
+def test_measure_preparation_cost_rejects_empty_right_names() -> None:
+    with pytest.raises(ValueError, match="right_names"):
+        measure_preparation_cost("overlap", ["Acme Traders"], [], [(0, 0)])
+
+
+def test_measure_preparation_cost_rejects_empty_comparison_pairs() -> None:
+    with pytest.raises(ValueError, match="comparison_pairs"):
+        measure_preparation_cost("overlap", ["Acme Traders"], ["Acme Traders Ltd"], [])
+
+
+def test_measure_preparation_cost_refuses_to_run_when_the_artifact_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from joinless.measurement import ArtifactRequirement
+
+    monkeypatch.setattr(
+        "joinless.measurement.verify_artifact",
+        lambda requirement: f"artifact missing at {requirement.path}",
+    )
+    missing = ArtifactRequirement(path=tmp_path / "missing.onnx", sha256="0" * 64)
+
+    result = measure_preparation_cost(
+        "overlap",
+        ["Acme Traders"],
+        ["Acme Traders Ltd"],
+        [(0, 0)],
+        artifact=missing,
+    )
+
+    assert isinstance(result, Unavailable)
+    assert "missing" in result.reason
+
+
+def test_measure_preparation_cost_reports_an_unexpected_crash_as_unavailable_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="boom"
+        )
+
+    monkeypatch.setattr("joinless.measurement.subprocess.run", _fake_run)
+
+    result = measure_preparation_cost(
+        "overlap", ["Acme Traders"], ["Acme Traders Ltd"], [(0, 0)]
+    )
+
+    assert isinstance(result, Unavailable)
+    assert result.reason == "boom"
+
+
 # --- measure_peak_memory(): peak RSS per arm, in its own process (issue #55) -------
 
 from joinless.measurement import _PEAK_MEMORY_SCRIPT, measure_peak_memory

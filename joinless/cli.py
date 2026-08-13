@@ -93,6 +93,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -106,6 +107,7 @@ from joinless.evaluation import (
     EvaluationReport,
     ExpectedWinners,
     InvalidRun,
+    Metric,
     SelectedThreshold,
     compute_accuracy_divergence,
     evaluate_sealed_test,
@@ -114,28 +116,41 @@ from joinless.evaluation import (
     select_threshold,
 )
 from joinless.measurement import (
+    PreparationCost,
     Unavailable,
     measure_artifact_size,
     measure_cold_start,
     measure_peak_memory,
+    measure_preparation_cost,
     measure_warm_latency,
 )
 from joinless.records import Record
-from joinless.resolver import ResolutionResult
+from joinless.resolver import (
+    DEFAULT_CELL_SIZE_DEGREES,
+    PreparationPath,
+    ResolutionResult,
+    bucket_occupancy,
+    candidate_pairs,
+    score_candidates,
+)
 from joinless.resolver import resolve as resolve_records
 from joinless.runrecord import (
     ArmResult,
+    BucketOccupancy,
     Environment,
     Hardware,
     MatmulConversion,
     Maybe,
     ModelIdentity,
+    PreparationAsymmetry,
+    PreparationComparison,
     RunAssembly,
     RuntimeVersions,
     build_evaluation_set_identity,
     write_record,
 )
 from joinless.scoring import (
+    Scorer,
     ScorerUnavailable,
     ThresholdMatcher,
     get_artifact_paths,
@@ -324,7 +339,21 @@ _REPETITION_COUNT = 20
 # `int8_accuracy_divergence` field was added; and `environment.quantized_operators`
 # was retyped from a flat operator-type list to a matmul-conversion census keyed by
 # candidate operator type (issue #68 finding 1).
-_SCHEMA = "benchmark-v3"
+#
+# v3 -> v4: `results.<arm>.preparation` was added (issue #65's third bullet) - each
+# arm's naive and hoisted preparation paths, each self-tagged with the path that
+# produced it. A new required field on every arm's result is exactly the kind of
+# breaking shape change the v2 -> v3 comment above already names the policy for.
+#
+# v4 -> v5: three more additions, all issue #66 - `results.<arm>.preparation_cost`
+# (hoisted/naive preparation *time*, as distinct from v4's score-equality-only
+# `preparation`), and two new top-level fields, `bucket_occupancy` (the candidate-
+# bucket occupancy distribution the run's preparation-cost sample was drawn from)
+# and `preparation_asymmetry` (the classical/neural hoist speed-up comparison,
+# reported as a result rather than left for a reader to derive). A new required
+# field anywhere in the record is the same breaking shape change the v2 -> v3
+# comment above already names the policy for.
+_SCHEMA = "benchmark-v5"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and
@@ -521,6 +550,16 @@ def _quantized_operators(
     return Maybe(value=census, reason=None)
 
 
+# issue #65's third bullet, Finding 2: `evaluate_sealed_test` (via `_predict`)
+# and this module's own warm-latency worker both prepare once, ahead of scoring,
+# and neither has a naive counterpart a run could select instead - a structural
+# fact about those two call sites, not a per-run choice, so it is a constant
+# here rather than a value threaded through _environment's own parameters. See
+# Environment.measurement_preparation_path's docstring for which figures this
+# does, and does not, cover.
+_MEASUREMENT_PREPARATION_PATH: PreparationPath = "hoisted"
+
+
 def _environment(
     power_mode: str,
     *,
@@ -539,6 +578,7 @@ def _environment(
         repetition_count=_REPETITION_COUNT,
         models=models,
         quantized_operators=quantized_operators,
+        measurement_preparation_path=_MEASUREMENT_PREPARATION_PATH,
     )
 
 
@@ -571,8 +611,174 @@ def _pool_corpora(corpora: Sequence[Corpus]) -> Corpus:
     )
 
 
+# The candidate-bucket occupancy this run's shared preparation-cost sample
+# produces (issue #66): one group of records per grid cell, deliberately
+# uneven sizes so bucket_occupancy() reports a real distribution rather than
+# one repeated value - a cell with 1 record, one with 2, one with 3, one with
+# 4. Every left/right record in a group shares one coordinate, so candidate
+# generation pairs a group's records with every other record in that same
+# group and none from any other group (groups sit whole integer degrees
+# apart, far outside DEFAULT_CELL_SIZE_DEGREES's neighbourhood).
+_PREPARATION_OCCUPANCY_GROUPS: tuple[int, ...] = (1, 2, 3, 4)
+_PREPARATION_SAMPLE_SIZE = sum(_PREPARATION_OCCUPANCY_GROUPS)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparationSample:
+    """The one candidate set every registered arm's preparation cost is
+    measured over in a run (issue #66) — the same set
+    :attr:`occupancy` describes, so a cost figure is never quoted without
+    the occupancy that produced it (ADR-0009).
+
+    ``comparison_pairs`` is ``(left_index, right_index)`` into
+    ``left_names``/``right_names`` — indices rather than the
+    :class:`~joinless.records.Record` objects themselves, because this is
+    exactly the shape :func:`~joinless.measurement.measure_preparation_cost`
+    passes to its isolated worker over an environment variable, which can
+    carry a list of plain values but not a ``Record``.
+    """
+
+    left_names: tuple[str, ...]
+    right_names: tuple[str, ...]
+    comparison_pairs: tuple[tuple[int, int], ...]
+    occupancy: BucketOccupancy
+
+
+def _build_preparation_sample(pooled: Corpus) -> _PreparationSample:
+    """Build this run's shared preparation-cost sample from the pooled
+    corpus's own real pair names (issue #66) — grouped by
+    :data:`_PREPARATION_OCCUPANCY_GROUPS` into ``DEFAULT_CELL_SIZE_DEGREES``
+    cells of deliberately uneven size, then run through the resolver's own
+    :func:`~joinless.resolver.candidate_pairs` and
+    :func:`~joinless.resolver.bucket_occupancy` — the same grid blocking a
+    real :func:`~joinless.resolver.resolve` run would use, so this sample's
+    occupancy is a fact about that blocking, not a number this function
+    invents and calls occupancy.
+    """
+    if len(pooled.pairs) < _PREPARATION_SAMPLE_SIZE:
+        raise ValueError(
+            "pooled corpus has fewer pairs than the preparation sample needs "
+            f"({len(pooled.pairs)} < {_PREPARATION_SAMPLE_SIZE})"
+        )
+
+    left_records: list[Record] = []
+    right_records: list[Record] = []
+    index = 0
+    for group, size in enumerate(_PREPARATION_OCCUPANCY_GROUPS):
+        coordinate = float(group)
+        for _ in range(size):
+            pair = pooled.pairs[index]
+            left_records.append(
+                Record(
+                    source="preparation-sample",
+                    ordinal=index,
+                    name=pair.left_name,
+                    latitude=coordinate,
+                    longitude=coordinate,
+                )
+            )
+            right_records.append(
+                Record(
+                    source="preparation-sample",
+                    ordinal=index,
+                    name=pair.right_name,
+                    latitude=coordinate,
+                    longitude=coordinate,
+                )
+            )
+            index += 1
+
+    pairs = candidate_pairs(left_records, right_records)
+    occupancy_by_cell = bucket_occupancy(right_records)
+    counts = tuple(occupancy_by_cell.values())
+    left_index_by_id = {id(record): i for i, record in enumerate(left_records)}
+    right_index_by_id = {id(record): i for i, record in enumerate(right_records)}
+    comparison_pairs = tuple(
+        (left_index_by_id[id(left)], right_index_by_id[id(right)])
+        for left, right in pairs
+    )
+    return _PreparationSample(
+        left_names=tuple(record.name for record in left_records),
+        right_names=tuple(record.name for record in right_records),
+        comparison_pairs=comparison_pairs,
+        occupancy=BucketOccupancy(
+            counts=counts,
+            cell_size_degrees=DEFAULT_CELL_SIZE_DEGREES,
+            # Named directly rather than left for a reader to reduce `counts`
+            # themselves (BucketOccupancy's own docstring, Finding 1) — the
+            # one number ADR-0009's claim ("the hoist pays in proportion to
+            # re-comparison") is actually about.
+            max_occupancy=max(counts),
+        ),
+    )
+
+
+# A shared coordinate, not an invented geography: the only thing it needs to
+# do is put both illustrative records in the same grid cell so
+# candidate_pairs (ADR-0009, issue #65) has exactly one pair to score. Any
+# equal pair of floats would do the same job.
+_PREPARATION_COMPARISON_COORDINATE = (0.0, 0.0)
+
+
+def _preparation_comparison(
+    scorer: Scorer[Any], threshold: float, left_name: str, right_name: str
+) -> PreparationComparison:
+    """Both preparation paths' own score for this run's illustrative
+    comparison (issue #65's third bullet: "the run record states which one
+    produced each figure") — the same ``left_name``/``right_name`` pair
+    every other per-arm measurement in this run already uses
+    (:func:`_measure_arm`), scored by
+    :func:`joinless.resolver.score_candidates` under each path in turn so
+    neither is this run's default by accident (that function's own required
+    ``preparation`` argument has no default either).
+
+    The two records share one coordinate purely so
+    :func:`~joinless.resolver.candidate_pairs`'s grid blocking pairs them
+    with each other — the only candidate pair this comparison needs, and
+    the same "one illustrative record" pattern :func:`_measure_arm` already
+    uses for warm latency, peak memory and cold start.
+
+    Cost is not measured here — issue #66's job, not this one's. This only
+    proves, on this run's own real scorer and data, that the two paths
+    agree — the general claim ``tests/test_resolver.py``'s property tests
+    already established, exercised here for the one comparison this run
+    actually makes.
+    """
+    latitude, longitude = _PREPARATION_COMPARISON_COORDINATE
+    left = [
+        Record(
+            source="benchmark",
+            ordinal=0,
+            name=left_name,
+            latitude=latitude,
+            longitude=longitude,
+        )
+    ]
+    right = [
+        Record(
+            source="benchmark",
+            ordinal=0,
+            name=right_name,
+            latitude=latitude,
+            longitude=longitude,
+        )
+    ]
+    matcher: ThresholdMatcher[Any] = ThresholdMatcher(
+        scorer=scorer, threshold=threshold
+    )
+    return PreparationComparison(
+        hoisted=score_candidates(left, right, matcher, preparation="hoisted"),
+        naive=score_candidates(left, right, matcher, preparation="naive"),
+    )
+
+
 def _measure_arm(
-    arm: str, pooled: Corpus, left_name: str, right_name: str, power_mode: str
+    arm: str,
+    pooled: Corpus,
+    left_name: str,
+    right_name: str,
+    power_mode: str,
+    sample: _PreparationSample,
 ) -> tuple[ArmResult, SelectedThreshold | None, ModelIdentity | None]:
     """Run the full protocol for ``arm``, or mark it unavailable everywhere at
     once.
@@ -588,6 +794,12 @@ def _measure_arm(
     ``selected_thresholds`` list. The third element is what ``arm`` loaded as
     a model, if anything (:func:`_model_identity`) — ``None`` for the same
     "never got this far" arms, and for every classical arm regardless.
+
+    ``sample`` is the run's one shared preparation-cost candidate set
+    (issue #66, :func:`_build_preparation_sample`) — every arm's
+    ``preparation_cost`` is timed over the same set, which is what makes
+    the run's own :class:`~joinless.runrecord.BucketOccupancy` the occupancy
+    that produced every arm's cost figure, not just one of them.
     """
     try:
         scorer = get_scorer(arm)
@@ -600,6 +812,8 @@ def _measure_arm(
                 peak_memory=Unavailable(arm=arm, reason=reason),
                 cold_start=Unavailable(arm=arm, reason=reason),
                 artifact_size=Unavailable(arm=arm, reason=reason),
+                preparation=Unavailable(arm=arm, reason=reason),
+                preparation_cost=Unavailable(arm=arm, reason=reason),
             ),
             None,
             None,
@@ -618,6 +832,10 @@ def _measure_arm(
     peak_memory = measure_peak_memory(arm, left_name, right_name, power_mode=power_mode)
     cold_start = measure_cold_start(arm, left_name, right_name)
     artifact_size = measure_artifact_size(get_artifact_paths(arm))
+    preparation = _preparation_comparison(scorer, frozen.value, left_name, right_name)
+    preparation_cost = measure_preparation_cost(
+        arm, sample.left_names, sample.right_names, sample.comparison_pairs
+    )
     return (
         ArmResult(
             accuracy=accuracy,
@@ -625,6 +843,8 @@ def _measure_arm(
             peak_memory=peak_memory,
             cold_start=cold_start,
             artifact_size=artifact_size,
+            preparation=preparation,
+            preparation_cost=preparation_cost,
         ),
         selected,
         _model_identity(arm),
@@ -710,6 +930,121 @@ def _int8_accuracy_divergence(
     )
 
 
+# ADR-0008 names two arm families, and ADR-0009 names the asymmetry between them
+# as part of the hoist's finding: the classical arms recompute a cheap set or
+# string operation on every naive re-preparation, the neural arms recompute an
+# embedding — named once here rather than re-derived from each arm's own scorer
+# class at call time.
+_CLASSICAL_ARMS: frozenset[str] = frozenset({"overlap", "fuzzy"})
+_NEURAL_ARMS: frozenset[str] = frozenset({"embed-fp32", "embed-int8"})
+
+
+def _hoist_speedup(cost: PreparationCost) -> Metric:
+    """How many times faster hoisted preparation was than naive, for one
+    arm's own :class:`~joinless.measurement.PreparationCost` (issue #66's
+    third bullet).
+
+    Undefined, not infinite, when ``hoisted_seconds`` measured at ``0.0`` —
+    a real possibility for the cheapest classical arms on a coarse clock —
+    the same "undefined is not zero" rule ADR-0013 states everywhere else a
+    figure in this run record might not be computable.
+    """
+    if cost.hoisted_seconds <= 0.0:
+        return Metric(
+            value=None,
+            undefined_reason="hoisted preparation measured at 0 seconds",
+        )
+    return Metric(
+        value=cost.naive_seconds / cost.hoisted_seconds, undefined_reason=None
+    )
+
+
+def _preparation_asymmetry(
+    arm_results: Mapping[str, ArmResult],
+    occupancy: BucketOccupancy,
+) -> PreparationAsymmetry:
+    """The classical/neural hoist speed-up comparison issue #66's third
+    bullet asks to be "reported as a result, not as an aside" — computed
+    once here, from every arm's own ``preparation_cost``, and handed to
+    :meth:`~joinless.runrecord.RunAssembly.build` rather than left for a
+    reader to compute by hand from the per-arm figures (:func:`_cmd_benchmark`).
+
+    An arm whose ``preparation_cost`` is
+    :class:`~joinless.measurement.Unavailable` — it never got far enough to
+    be timed — contributes to neither mapping, mirroring how
+    :func:`_find_contradictions` only ever compares arms with a real report
+    to compare. An arm belonging to neither :data:`_CLASSICAL_ARMS` nor
+    :data:`_NEURAL_ARMS` contributes to neither either — not reachable
+    through :data:`_ARMS` today, since every registered arm is one or the
+    other, but this function does not assume that of its argument.
+
+    ``occupancy`` is the run's own :class:`~joinless.runrecord.BucketOccupancy`
+    for the shared candidate set every arm's ``preparation_cost`` was
+    measured over — carried on the returned
+    :class:`~joinless.runrecord.PreparationAsymmetry` rather than left as a
+    separate value the caller has to remember to attach later (Finding 1;
+    see that type's own docstring for why occupancy belongs to the finding
+    it explains).
+    """
+    classical: dict[str, Metric] = {}
+    neural: dict[str, Metric] = {}
+    for arm, result in arm_results.items():
+        if not isinstance(result.preparation_cost, PreparationCost):
+            continue
+        speedup = _hoist_speedup(result.preparation_cost)
+        if arm in _CLASSICAL_ARMS:
+            classical[arm] = speedup
+        elif arm in _NEURAL_ARMS:
+            neural[arm] = speedup
+    return PreparationAsymmetry(
+        occupancy=occupancy,
+        classical_speedups=MappingProxyType(classical),
+        neural_speedups=MappingProxyType(neural),
+    )
+
+
+def _format_preparation_asymmetry(asymmetry: PreparationAsymmetry) -> list[str]:
+    """The lines ``benchmark`` prints for its preparation-hoist asymmetry
+    finding (issue #66's third bullet, mirroring :func:`_format_contradictions`'s
+    own "findings... not a footnote" reasoning) — a pure function of the
+    comparison :func:`_preparation_asymmetry` already computed, so what the
+    command prints and what it persists in ``preparation_asymmetry`` can
+    never say two different things about the same run.
+
+    The occupancy this run's speed-ups were measured at is printed alongside
+    them (Finding 1) — a reader of the printed output, not only of the JSON
+    record, needs the same fact ADR-0009 requires travel with the result:
+    "the hoist pays in proportion to re-comparison." The max is stated
+    plainly rather than judged "small" or "large" here — this function does
+    not invent a threshold; it hands the reader the one number ADR-0009's
+    claim is about and the direction the claim predicts, and lets them judge
+    it against whatever occupancy their own dataset has.
+    """
+    occupancy = asymmetry.occupancy
+    lines = [
+        "preparation hoist speed-up (naive seconds / hoisted seconds):",
+        (
+            f"  measured over candidate-bucket occupancy {list(occupancy.counts)} "
+            f"(max {occupancy.max_occupancy}, cell size {occupancy.cell_size_degrees} "
+            "degrees) — ADR-0009: the hoist's advantage grows with how full a "
+            "bucket gets, so a denser dataset than this sample would show a larger "
+            "speed-up, not this one"
+        ),
+    ]
+    for label, speedups in (
+        ("classical", asymmetry.classical_speedups),
+        ("neural", asymmetry.neural_speedups),
+    ):
+        if not speedups:
+            lines.append(f"  {label}: no arm in this run produced a comparable figure")
+            continue
+        for arm in sorted(speedups):
+            metric = speedups[arm]
+            value = "undefined" if metric.value is None else f"{metric.value:.2f}x"
+            lines.append(f"  {label} {arm}: {value}")
+    return lines
+
+
 def _format_contradictions(contradictions: Sequence[Contradiction]) -> list[str]:
     """The lines ``benchmark`` prints for its contradictions finding (issue
     #50: "findings... not a footnote") — a pure function of the comparison
@@ -744,6 +1079,11 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     evaluation_set = build_evaluation_set_identity(corpora)
     left_name = pooled.pairs[0].left_name
     right_name = pooled.pairs[0].right_name
+    # issue #66: one shared candidate set, drawn once, that every arm's
+    # preparation cost is measured over - so this run's own bucket_occupancy
+    # is the occupancy that produced every arm's cost figure, never a
+    # parameter echoed back without the run that produced it (ADR-0009).
+    preparation_sample = _build_preparation_sample(pooled)
 
     assembly = RunAssembly(expected_winners=_EXPECTED_WINNERS)
     arm_results: dict[str, ArmResult] = {}
@@ -756,7 +1096,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     model_identities: dict[str, ModelIdentity] = {}
     for arm in _ARMS:
         result, selected, identity = _measure_arm(
-            arm, pooled, left_name, right_name, power_mode
+            arm, pooled, left_name, right_name, power_mode, preparation_sample
         )
         assembly.add_arm(arm, result)
         arm_results[arm] = result
@@ -773,6 +1113,13 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     # accuracy reports, and persisted rather than recomputed - the same
     # discipline `contradictions` above already follows.
     int8_accuracy_divergence = _int8_accuracy_divergence(arm_results)
+    # issue #66's third bullet: computed once here, from this run's own
+    # per-arm preparation costs, and persisted rather than recomputed - the
+    # same discipline `contradictions` and `int8_accuracy_divergence` above
+    # already follow.
+    preparation_asymmetry = _preparation_asymmetry(
+        arm_results, preparation_sample.occupancy
+    )
 
     # issue #68's third bullet: a graph that does not match its recorded
     # operator list must not produce a record at all - caught here, before
@@ -801,6 +1148,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         selected_thresholds=tuple(selected_thresholds),
         contradictions=contradictions,
         int8_accuracy_divergence=int8_accuracy_divergence,
+        preparation_asymmetry=preparation_asymmetry,
     )
     try:
         path = write_record(record, Path("benchmarks"))
@@ -812,6 +1160,8 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         return 1
     print(f"wrote {path}")
     for line in _format_contradictions(contradictions):
+        print(line)
+    for line in _format_preparation_asymmetry(preparation_asymmetry):
         print(line)
     return 0
 
