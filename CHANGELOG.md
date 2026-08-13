@@ -69,6 +69,21 @@ warns nobody.
   stated as a figure rather than left for a reader to compute — a pooled figure and its
   variation are structurally inseparable in the record: the type they are recorded on
   cannot be constructed with one and not the other.
+- `joinless.report` and `joinless report` — the per-family results table rendered from a
+  run record and nothing else. The command re-renders what a run already wrote: it
+  measures nothing, constructs no scorer, and has no argument through which a figure
+  could arrive instead of being read.
+- A false positive count on every family for every arm. It is defined wherever precision
+  and recall are not, which is what lets the two all-negative families report a result at
+  all: on the lexical trap family the arms separate 115 / 5 / 1 / 0, where every one of
+  them previously reported `null`.
+- `joinless.frontier` — the Pareto frontier per family under constraints a caller states,
+  over accuracy, false positives, resident memory and warm latency. "No arm qualifies" is
+  a first-class result naming why each arm was excluded, and no generic winner row is
+  emitted anywhere.
+- A generated results section in the README, produced from one named record by a committed
+  command, carrying the reference machine, the corpus, the seeds and the scope the
+  evidence supports.
 
 ### Fixed
 

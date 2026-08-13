@@ -113,6 +113,145 @@ precision, recall and F1, the four resource measurements, and the int8 arm's per
 accuracy divergence from fp32, with the exact hardware and runtime versions recorded
 alongside every run.
 
+<!-- BEGIN GENERATED RESULTS: do not edit by hand — regenerate with `uv run python scripts/render_readme_results.py <record> README.md` -->
+
+## Results
+
+Generated from [`benchmarks/20260813T130904Z-benchmark.json`](benchmarks/20260813T130904Z-benchmark.json) by `uv run python scripts/render_readme_results.py benchmarks/20260813T130904Z-benchmark.json README.md` — every figure below traces to that one run record.
+
+**Reference machine:** Darwin 25.5.0 (arm64), 12 cores, 32.0 GiB RAM, Python 3.14.5
+
+**Corpus:** the built-in synthetic corpus (`joinless.corpus`), pooled across seeds 1, 2, 3, 4, 5; families: abbreviation, character noise, exact, formatting, near-miss negative, semantic alias, transliteration, word order
+
+Results are scoped to this disclosed synthetic benchmark on the reference machine named above. They describe how these four matchers compare on this corpus, what the embedding arms cost on this hardware, and whether the preparation hoist and quantization change those costs — nothing wider (ADR-0010). They are not a universal ranking. In particular: this is not a location of "the classical/neural crossover" — two classical matchers and one embedding model do not locate a frontier across either family of technique; it is not a claim that embeddings beat string matching in general, which is already established prior art (see LinkTransformer, cited below), not re-asserted here; and it is not a claim that these results transfer to real corpora unchanged, since the corpus is synthetic by construction.
+
+### Aggregate
+
+| arm | aggregate F1 | warm p50 | peak RSS | artifact |
+|---|---|---|---|---|
+| `embed-fp32` | 0.871 | 25.00µs | 279.1 MB | 91.1 MB |
+| `embed-int8` | 0.866 | 25.25µs | 208.9 MB | 59.3 MB |
+| `fuzzy` | 0.886 | 0.96µs | 24.2 MB | — (classical arms carry no model artifact) |
+| `overlap` | 0.721 | 0.21µs | 22.7 MB | — (classical arms carry no model artifact) |
+
+### exact
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | 1.000 | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | 1.000 | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | 1.000 | 0 | 0.96µs | 24.2 MB |
+| `overlap` | 1.000 | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=1.000, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### formatting
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | 1.000 | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | 1.000 | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | 1.000 | 0 | 0.96µs | 24.2 MB |
+| `overlap` | 1.000 | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=1.000, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### word order
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | 1.000 | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | 1.000 | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | 1.000 | 0 | 0.96µs | 24.2 MB |
+| `overlap` | 1.000 | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=1.000, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (f1=1.000, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### abbreviation
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | 0.769 | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | 0.750 | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | 0.974 | 0 | 0.96µs | 24.2 MB |
+| `overlap` | 1.000 | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=1.000, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (f1=0.974, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (f1=0.974, false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### character noise
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | null (precision is undefined: no predicted positives) | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | null (precision is undefined: no predicted positives) | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | null (precision is undefined: no predicted positives) | 0 | 0.96µs | 24.2 MB |
+| `overlap` | null (precision is undefined: no predicted positives) | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=null, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### semantic alias
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | null (precision is undefined: no predicted positives) | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | null (precision is undefined: no predicted positives) | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | null (precision is undefined: no predicted positives) | 0 | 0.96µs | 24.2 MB |
+| `overlap` | null (precision is undefined: no predicted positives) | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=null, false_positives=0).
+
+- `embed-fp32`: dominated by 'fuzzy' (false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `embed-int8`: dominated by 'fuzzy' (false_positives=0, peak RSS=24.2 MB, warm p50=0.96µs)
+- `fuzzy`: dominated by 'overlap' (false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### transliteration
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | 1.000 | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | 1.000 | 0 | 25.25µs | 208.9 MB |
+| `fuzzy` | 0.961 | 0 | 0.96µs | 24.2 MB |
+| `overlap` | 1.000 | 0 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `overlap` (f1=1.000, false_positives=0).
+
+- `embed-fp32`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+- `embed-int8`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+- `fuzzy`: dominated by 'overlap' (f1=1.000, false_positives=0, peak RSS=22.7 MB, warm p50=0.21µs)
+
+### near-miss negative
+
+| arm | f1 | false_positives | warm p50 | peak RSS |
+|---|---|---|---|---|
+| `embed-fp32` | null (precision is undefined: no predicted positives) | 0 | 25.00µs | 279.1 MB |
+| `embed-int8` | null (recall is undefined: no actual positives) | 1 | 25.25µs | 208.9 MB |
+| `fuzzy` | null (recall is undefined: no actual positives) | 5 | 0.96µs | 24.2 MB |
+| `overlap` | null (recall is undefined: no actual positives) | 115 | 0.21µs | 22.7 MB |
+
+**On the frontier** (no stated constraints — none of these is dominated by another): `embed-fp32` (f1=null, false_positives=0), `embed-int8` (f1=null, false_positives=1), `fuzzy` (f1=null, false_positives=5), `overlap` (f1=null, false_positives=115).
+
+<!-- END GENERATED RESULTS -->
+
 ## Target platform
 
 Arm64 client devices. The reference platform is Apple Silicon (M2 Max). Every published

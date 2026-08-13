@@ -37,25 +37,62 @@ reader whose data resembles a family sees what that arm actually does there — 
 regime the run's single aggregate index cannot show, but one this module can
 compute purely by grouping data the record already holds.
 
-**Why exactly three constraint dimensions.** RFC-0002 "Decision output" names them
-directly: "a memory ceiling, a latency ceiling, an accuracy floor, any combination
-of these." Peak resident memory and warm p50 latency are the two cost figures
+**Why four constraint dimensions, not three (issue #106).** RFC-0002 "Decision
+output" names a memory ceiling, a latency ceiling and an accuracy floor. Peak
+resident memory and warm p50 latency are the two cost figures
 :class:`~joinless.runrecord.ArmResult` measures once per arm, independent of
 family; F1 is the one comparable accuracy figure RFC-0002's Metrics table names
-("a single comparable number") and is read per family. A field left ``None``
-means the reader stated no constraint on that dimension — it never excludes an
-arm, and it is never coerced into an implicit ceiling of "whatever this run
-happened to measure."
+("a single comparable number") and is read per family. Alongside those three sits
+a fourth: false positives, read per family exactly as F1 is
+(:mod:`joinless.evaluation`'s ``FamilyResult.false_positives`` — "a plain count,
+never a ratio, so it has no empty-denominator case to be undefined by and is
+defined on every family, every arm, every run"). Where F1 asks *how well did this
+arm do*, false positives asks *how often did it call two different entities the
+same* — a question issue #105 added because F1 cannot answer it on an
+all-negative family, where precision and recall have no denominator at all. A
+field left ``None`` means the reader stated no constraint on that dimension — it
+never excludes an arm, and it is never coerced into an implicit ceiling of
+"whatever this run happened to measure." Lower is better for false positives,
+the same direction as the two cost ceilings; higher is better for F1 alone.
 
-**Why undefined accuracy excludes an arm rather than passing or failing a
-floor.** A family's F1 can be undefined — ``semantic alias`` and
-``near-miss negative`` are all-negative by design (:mod:`joinless.corpus`'s module
-docstring), so recall and F1 are undefined for every arm there, always. An
-undefined F1 is not zero and is not "no constraint stated" either; comparing an
-absent number against a floor is not a comparison this module can draw one way or
-the other, so the arm is excluded from that family's frontier with the record's
-own reason attached, the same "undefined propagates, never collapses to a number"
-rule ADR-0013 states for every other figure this project reports.
+**Why undefined F1 still excludes an arm from a stated floor, but no longer
+excludes it from the frontier outright (issue #106).** A family's F1 can be
+undefined — ``semantic alias`` and ``near-miss negative`` are all-negative by
+design (:mod:`joinless.corpus`'s module docstring), so recall and F1 are
+undefined for every arm there, always; ``character noise`` can reach the same
+state at run time, if every arm's calibrated threshold happens to admit nothing
+on it. An undefined F1 is not zero and is not "no constraint stated" either;
+comparing an absent number against a stated floor is not a comparison this
+module can draw one way or the other, so a *stated* floor still excludes the arm,
+with the record's own reason attached — the "undefined propagates, never
+collapses to a number" rule ADR-0013 states for every other figure this project
+reports. What changed is what happens when no floor is stated: false positives
+is always defined (the paragraph above), so an arm with undefined F1 is no
+longer dropped from the frontier for want of an axis to place it on — it competes
+on false positives and cost like any other candidate, with ``f1=None`` recorded
+on its :class:`FrontierPoint` rather than a number that was never measured.
+Before this, a family where F1 was undefined for every arm reported "no arm
+qualifies" under no constraints at all — indistinguishable from a constraint set
+nothing satisfies, on the exact family where the run record's four arms produced
+the most distinct outcomes (issue #106).
+
+**What "dominates" means once F1 may be absent.** Domination stays what RFC-0002
+defines it as — at least as good on every axis, strictly better on one — but an
+axis that is undefined for a candidate cannot be compared, and ADR-0013's rule
+against collapsing an undefined value into a number applies to a *comparison*
+result exactly as it applies to a metric. Rather than decide, pair by pair,
+whether to skip F1 (which would make "A beats B" and "B beats C" imply nothing
+about "A beats C", breaking domination as an ordering and, with it, the
+guarantee that a non-empty candidate set always yields a non-empty frontier),
+this module decides once per family: F1 participates in every comparison in
+that family's frontier if and only if every candidate reaching the domination
+step has a defined F1, never a per-pair decision (:func:`_pareto_frontier`).
+Every family in the current benchmark corpus is already uniform this way — F1's
+undefinedness there traces to a family-wide property (no actual positives, or
+every arm's threshold admitting nothing), never to one arm alone — so this rule
+changes no comparison a defined-F1 family already made; it only decides the
+family where F1 is undefined throughout, which is exactly the case issue #106
+exists to fix.
 
 **Why an unavailable or invalid arm is excluded, with its reason kept.**
 Mirroring :mod:`joinless.report`: an arm whose accuracy is ``invalid``, or whose
@@ -87,10 +124,11 @@ from typing import Any
 @dataclass(frozen=True, slots=True)
 class Constraints:
     """The reader-stated constraints a frontier is computed under (RFC-0002
-    "Decision output"): a memory ceiling, a latency ceiling, an accuracy floor,
-    any combination of these. Every field defaults to ``None``, meaning the
-    reader stated no constraint on that dimension — never an implicit default
-    that silently narrows the field to whatever this run happened to measure.
+    "Decision output", extended by issue #106): a memory ceiling, a latency
+    ceiling, a false-positives ceiling, an accuracy floor, any combination of
+    these. Every field defaults to ``None``, meaning the reader stated no
+    constraint on that dimension — never an implicit default that silently
+    narrows the field to whatever this run happened to measure.
 
     Recorded verbatim on :class:`FrontierResult` (issue #70's fourth bullet:
     "constraints used are recorded with the output, so a frontier can be
@@ -101,20 +139,28 @@ class Constraints:
     max_peak_rss_bytes: float | None = None
     max_warm_p50_seconds: float | None = None
     min_f1: float | None = None
+    max_false_positives: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FrontierPoint:
     """One arm's operating point for one family: its own F1 at the run's
-    frozen threshold (issue #96's "per-family operating point"), and its
-    per-run cost figures alongside it — the exact three dimensions
-    :class:`Constraints` can bound.
+    frozen threshold (issue #96's "per-family operating point"), its false
+    positives for that same family (issue #106), and its per-run cost figures
+    alongside them — the exact four dimensions :class:`Constraints` can bound.
+
+    ``f1`` is ``None`` exactly when this family's F1 is undefined for this arm
+    — never a number standing in for "not measured" (module docstring).
+    ``false_positives`` is never ``None``: it is a plain count with no
+    empty-denominator case to be undefined by, defined on every family, every
+    arm, every run (:mod:`joinless.evaluation`'s ``FamilyResult.false_positives``).
     """
 
     arm: str
-    f1: float
+    f1: float | None
     peak_rss_bytes: float
     warm_p50_seconds: float
+    false_positives: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,11 +246,7 @@ def _evaluate_candidate(
         return None, f"{family!r} was not reported in this arm's accuracy"
 
     f1 = family_row["f1"]["value"]
-    if f1 is None:
-        return (
-            None,
-            f"F1 is undefined for {family!r}: {family_row['f1']['undefined_reason']}",
-        )
+    false_positives = family_row["false_positives"]
 
     peak_memory = arm_result["peak_memory"]
     if peak_memory.get("status") != "ok":
@@ -219,8 +261,23 @@ def _evaluate_candidate(
         )
     warm_p50_seconds = warm_latency["p50_seconds"]
 
-    if constraints.min_f1 is not None and f1 < constraints.min_f1:
-        return None, f"F1 {f1:.3f} is below the stated floor {constraints.min_f1:.3f}"
+    # A *stated* accuracy floor still excludes an arm whose F1 is undefined —
+    # an absent number cannot be compared against a floor one way or the
+    # other (module docstring, ADR-0013). With no floor stated, undefined F1
+    # is not itself a reason to exclude: the arm still competes on false
+    # positives and cost (issue #106).
+    if constraints.min_f1 is not None:
+        if f1 is None:
+            return None, (
+                f"F1 is undefined for {family!r}: "
+                f"{family_row['f1']['undefined_reason']} — cannot be compared "
+                "against the stated accuracy floor"
+            )
+        if f1 < constraints.min_f1:
+            return (
+                None,
+                f"F1 {f1:.3f} is below the stated floor {constraints.min_f1:.3f}",
+            )
     if (
         constraints.max_peak_rss_bytes is not None
         and peak_rss_bytes > constraints.max_peak_rss_bytes
@@ -237,6 +294,14 @@ def _evaluate_candidate(
             f"warm p50 {warm_p50_seconds:.9f}s exceeds the stated ceiling "
             f"{constraints.max_warm_p50_seconds:.9f}s"
         )
+    if (
+        constraints.max_false_positives is not None
+        and false_positives > constraints.max_false_positives
+    ):
+        return None, (
+            f"false positives {false_positives} exceeds the stated ceiling "
+            f"{constraints.max_false_positives}"
+        )
 
     return (
         FrontierPoint(
@@ -244,30 +309,75 @@ def _evaluate_candidate(
             f1=f1,
             peak_rss_bytes=peak_rss_bytes,
             warm_p50_seconds=warm_p50_seconds,
+            false_positives=false_positives,
         ),
         None,
     )
 
 
-def _dominates(candidate: FrontierPoint, other: FrontierPoint) -> bool:
+def _dominates(
+    candidate: FrontierPoint, other: FrontierPoint, *, compare_f1: bool = True
+) -> bool:
     """Whether ``candidate`` dominates ``other``: at least as good on every
     dimension — higher or equal F1, lower or equal peak RSS, lower or equal
-    warm p50 — and strictly better on at least one (RFC-0002 "Decision
-    output": "no other arm beats it on every stated dimension at once").
-    Two points equal on all three dimensions dominate neither one another,
-    so both remain on the frontier — a genuine tie is not a winner either.
+    warm p50, lower or equal false positives — and strictly better on at
+    least one (RFC-0002 "Decision output": "no other arm beats it on every
+    stated dimension at once", extended by issue #106 to a fourth axis). Two
+    points equal on every dimension dominate neither one another, so both
+    remain on the frontier — a genuine tie is not a winner either.
+
+    ``compare_f1`` states whether F1 is one of the axes being compared at
+    all. It defaults to ``True`` — the ordinary case, where every candidate
+    in the comparison has a defined F1. A caller passes ``False`` only when
+    F1 is undefined for the candidates being compared, in which case it is
+    excluded from the comparison entirely rather than treated as tying or
+    losing (module docstring's "what dominates means once F1 may be
+    absent"): peak RSS, warm p50 and false positives alone decide it.
     """
     at_least_as_good = (
-        candidate.f1 >= other.f1
-        and candidate.peak_rss_bytes <= other.peak_rss_bytes
+        candidate.peak_rss_bytes <= other.peak_rss_bytes
         and candidate.warm_p50_seconds <= other.warm_p50_seconds
+        and candidate.false_positives <= other.false_positives
     )
     strictly_better = (
-        candidate.f1 > other.f1
-        or candidate.peak_rss_bytes < other.peak_rss_bytes
+        candidate.peak_rss_bytes < other.peak_rss_bytes
         or candidate.warm_p50_seconds < other.warm_p50_seconds
+        or candidate.false_positives < other.false_positives
     )
+    if compare_f1:
+        assert candidate.f1 is not None and other.f1 is not None, (
+            "compare_f1=True requires both points to carry a defined F1 — "
+            "_pareto_frontier only sets it once every candidate in the "
+            "family does"
+        )
+        at_least_as_good = at_least_as_good and candidate.f1 >= other.f1
+        strictly_better = strictly_better or candidate.f1 > other.f1
     return at_least_as_good and strictly_better
+
+
+def format_mb(bytes_value: float) -> str:
+    """Bytes as megabytes, one decimal — the rendering a reader meets.
+
+    Lives here rather than in a presentation module because :func:`_describe`
+    needs it: a frontier's own exclusion reasons are published verbatim beside
+    tables that use this same rendering, and two spellings of one quantity in
+    adjacent lines make a reader convert between them to check they agree.
+    """
+    return f"{bytes_value / 1_000_000:.1f} MB"
+
+
+def format_microseconds(seconds: float) -> str:
+    """Seconds as microseconds, two decimals — see :func:`format_mb`."""
+    return f"{seconds * 1_000_000:.2f}µs"
+
+
+def _describe(point: FrontierPoint, *, compare_f1: bool) -> str:
+    f1_part = f"f1={point.f1:.3f}, " if compare_f1 else ""
+    return (
+        f"{f1_part}false_positives={point.false_positives}, "
+        f"peak RSS={format_mb(point.peak_rss_bytes)}, "
+        f"warm p50={format_microseconds(point.warm_p50_seconds)}"
+    )
 
 
 def _pareto_frontier(
@@ -276,7 +386,15 @@ def _pareto_frontier(
     """The non-dominated subset of ``candidates``, and the reason every
     dominated candidate was excluded — naming which surviving arm dominates
     it, so "excluded" never means only "failed a stated constraint."
+
+    F1 participates in domination for this whole family if and only if every
+    candidate here has a defined F1 — decided once, not per pair (module
+    docstring's "what dominates means once F1 may be absent"; the same
+    decision is what keeps domination a strict partial order, which is what
+    guarantees a non-empty ``candidates`` always yields a non-empty
+    frontier — see the comment where that guarantee is used, below).
     """
+    compare_f1 = all(point.f1 is not None for point in candidates)
     frontier: list[FrontierPoint] = []
     dominated: dict[str, str] = {}
     for point in candidates:
@@ -284,7 +402,8 @@ def _pareto_frontier(
             (
                 other
                 for other in candidates
-                if other.arm != point.arm and _dominates(other, point)
+                if other.arm != point.arm
+                and _dominates(other, point, compare_f1=compare_f1)
             ),
             None,
         )
@@ -292,9 +411,8 @@ def _pareto_frontier(
             frontier.append(point)
         else:
             dominated[point.arm] = (
-                f"dominated by {dominator.arm!r} (f1={dominator.f1:.3f}, "
-                f"peak RSS={dominator.peak_rss_bytes:.0f} bytes, "
-                f"warm p50={dominator.warm_p50_seconds:.9f}s)"
+                f"dominated by {dominator.arm!r} "
+                f"({_describe(dominator, compare_f1=compare_f1)})"
             )
     return tuple(frontier), dominated
 

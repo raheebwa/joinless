@@ -214,13 +214,37 @@ it cost on the reference machine, and does a regime exist where the cheaper arm 
 the right call* — not a single figure that resolves that trade-off on the reader's
 behalf.
 
-**Frontier constraints are exactly three: a memory ceiling on peak RSS, a latency
-ceiling on warm p50, an accuracy floor on F1.** Peak RSS and warm p50 are each measured
-once per arm, independent of family; F1 is the Metrics table's "single comparable
-number" and is read per family (below). An arm whose accuracy for a family is undefined
-— `null`, with a reason, never `0.0` (ADR-0013) — cannot be compared against a stated
-floor one way or the other, so it is excluded from that family's frontier with the
-record's own reason attached, not silently scored as failing the floor.
+**Frontier constraints are four: a memory ceiling on peak RSS, a latency ceiling on
+warm p50, a false-positives ceiling, an accuracy floor on F1.** Peak RSS and warm p50
+are each measured once per arm, independent of family; F1 and false positives are each
+read per family (below). An arm whose accuracy for a family is undefined — `null`, with
+a reason, never `0.0` (ADR-0013) — cannot be compared against a *stated* floor one way
+or the other, so it is excluded from that family's frontier with the record's own
+reason attached, not silently scored as failing the floor.
+
+False positives was added after the first three (issue #106). `semantic alias` and
+`near-miss negative` are all-negative by design (below), so precision and recall have
+no denominator and F1 is undefined for every arm, always — the frontier had no axis to
+place an arm on, and reported "no arm qualifies" on the family the four arms separate
+most clearly, indistinguishable from a constraint set nothing satisfies. False positives
+— `predicted_positives - true_positives`, a plain count with no empty-denominator case
+to be undefined by — is defined on every family, every arm, every run, exactly as peak
+RSS and warm p50 are, and is bounded by a ceiling the same way: lower is better, like
+cost, not like F1. With no floor stated, an arm no longer needs a defined F1 to reach the
+frontier; it competes on false positives and cost instead, and its `f1` is recorded as
+undefined rather than omitted or coerced into a number. A *stated* floor still excludes
+it — an absent F1 still cannot be compared against one — so "no arm qualifies" keeps
+meaning exactly what it always meant: a constraint set nothing satisfies, never a
+frontier with no axis to place an arm on.
+
+Domination is decided on whichever of the four axes are actually comparable: F1
+participates only when every arm being compared has a defined F1, decided once per
+family rather than pair by pair (an undefined value cannot be collapsed into "equal" or
+"worse" without breaking domination as an ordering); the two cost axes and false
+positives always participate, since they are always defined. On a family where every
+arm's F1 is defined, this changes nothing — false positives simply joins the axes
+already compared, and is `0` for every arm on an all-positive family, where a predicted
+positive is a true positive by definition, so it neither helps nor distorts there.
 
 **The frontier is computed per family, never from the whole-record aggregate.** A
 constraint set is a statement about the reader's own data, and the aggregate describes
