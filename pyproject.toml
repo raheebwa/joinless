@@ -30,7 +30,20 @@ dev = [
     # makes that statement true rather than aspirational.
     "hypothesis>=6.140",
 ]
-neural = ["onnxruntime>=1.28", "onnx>=1.22"]
+# `tokenizers` is the standalone Rust tokenizer, not `transformers`. An ONNX graph
+# takes token ids, so an inference-only install still needs something to produce
+# them, and this is the smallest thing that does (ADR-0017).
+# `tokenizers` is the standalone Rust tokenizer, not `transformers`: an ONNX graph
+# takes token ids, so an inference-only install still needs something to produce
+# them, and this is the smallest thing that does (ADR-0017). It depends on
+# huggingface_hub, which depends on requests - but only `Tokenizer.from_pretrained`
+# reaches for either, and this package loads a local tokenizer.json through
+# `Tokenizer.from_file` instead, so neither is on the import path.
+neural = [
+    "onnxruntime>=1.28",
+    "onnx>=1.22",
+    "tokenizers>=0.20",
+]
 # Build-time tooling for producing model artefacts (spikes/quantization/), kept out of
 # `neural` because that extra names the inference runtime whose cost the benchmark
 # measures — folding export tooling into it would change what the measurement means
@@ -59,6 +72,8 @@ module = [
     "onnxruntime.*",
     "optimum",
     "optimum.*",
+    "tokenizers",
+    "tokenizers.*",
     "torch",
     "torch.*",
     "transformers",

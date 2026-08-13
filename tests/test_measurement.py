@@ -352,9 +352,50 @@ def test_measure_cold_start_refuses_to_run_when_the_artifact_is_missing(
     assert result.reason == f"artifact missing at {missing.path}"
 
 
-# --- _sum_defined(): the "total" derivation, skipping (not zeroing) undefined -----
+# --- measure_artifact_size(): bytes on disk per arm (RFC-0002 Metrics, issue #63) --
 
 from joinless.evaluation import Metric
+from joinless.measurement import measure_artifact_size
+
+
+def test_measure_artifact_size_sums_bytes_across_every_path(tmp_path: Path) -> None:
+    model = tmp_path / "model.onnx"
+    tokenizer = tmp_path / "tokenizer.json"
+    model.write_bytes(b"0" * 100)
+    tokenizer.write_bytes(b"0" * 25)
+
+    result = measure_artifact_size([model, tokenizer])
+
+    assert result == Metric(value=125.0, undefined_reason=None)
+
+
+def test_measure_artifact_size_is_read_from_the_file_not_a_constant(
+    tmp_path: Path,
+) -> None:
+    """The figure has to come from the filesystem at call time (issue #63's
+    last bullet), not from anything compiled into the source — proven by
+    changing the file on disk between two calls and getting two different
+    answers, which a hardcoded constant could not do."""
+    artifact = tmp_path / "model.onnx"
+    artifact.write_bytes(b"0" * 10)
+
+    first = measure_artifact_size([artifact])
+    artifact.write_bytes(b"0" * 40)
+    second = measure_artifact_size([artifact])
+
+    assert first.value == 10.0
+    assert second.value == 40.0
+
+
+def test_measure_artifact_size_is_undefined_when_no_paths_are_given() -> None:
+    result = measure_artifact_size([])
+
+    assert result.value is None
+    assert result.undefined_reason == "classical arms carry no model artifact"
+
+
+# --- _sum_defined(): the "total" derivation, skipping (not zeroing) undefined -----
+
 from joinless.measurement import _sum_defined
 
 

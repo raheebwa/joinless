@@ -505,3 +505,34 @@ def measure_cold_start(
         ),
         not_attributable=_NOT_ATTRIBUTABLE_PHASES,
     )
+
+
+_NO_ARTIFACT_REASON = "classical arms carry no model artifact"
+
+
+def measure_artifact_size(paths: Sequence[Path]) -> Metric:
+    """Total bytes on disk across every artefact file an arm depends on
+    (RFC-0002 Metrics, "Artefact size"; issue #63).
+
+    Read directly off the filesystem via ``Path.stat().st_size`` at call
+    time — never a constant compiled into this module, so the figure tracks
+    whatever file is actually on disk rather than whatever a model card once
+    said about it (issue #63's last bullet: "measured from the file, never
+    from documentation about the model").
+
+    ``paths`` empty means the arm carries no model artefact at all — true of
+    both classical arms. That is recorded as an explicit undefined
+    :class:`~joinless.evaluation.Metric`, the same "undefined is not zero"
+    rule ADR-0013 states everywhere else in this module: ``0.0`` would claim
+    a zero-byte artefact exists, when the classical arms have no artefact at
+    all (issue #63: "the classical arms are not exempt... a zero or an empty
+    cell for the classical arms is a fact worth stating explicitly"). This
+    function does not spawn a worker — unlike every other metric in this
+    module, a file's size on disk is not a runtime-resource figure a shared
+    process could contaminate (module docstring), so no isolation is needed
+    to make it mean what it says.
+    """
+    if not paths:
+        return Metric(value=None, undefined_reason=_NO_ARTIFACT_REASON)
+    total_bytes = sum(path.stat().st_size for path in paths)
+    return Metric(value=float(total_bytes), undefined_reason=None)

@@ -43,12 +43,15 @@ here — reading a supplied file is issue #76, milestone M7 — so the only inpu
 "several deterministic seeds" is a fact about what threshold selection and the sealed
 test actually drew from, not only about what
 :func:`~joinless.runrecord.build_evaluation_set_identity` claims for the same run.
-Only ``overlap`` and ``fuzzy`` are registered in :mod:`joinless.scoring` today;
-``embed-fp32`` and ``embed-int8`` (:data:`_ARMS`) are attempted anyway, and
-``get_scorer`` raises the same ``ValueError`` for either name that it raises for any
-other name it does not recognise — ADR-0013's "an arm that cannot initialise is
-recorded... not omitted" satisfied by the real case rather than a stub, because
-milestone M3 is what will register them, not a hypothetical gap invented here.
+``overlap`` and ``fuzzy`` are always registered in :mod:`joinless.scoring`;
+``embed-fp32`` is registered too (M3), but only *available* where
+``JOINLESS_MODEL_CACHE_DIR`` names a directory holding its checksummed artefact
+(:mod:`joinless.embedding`) — ``embed-int8`` remains unregistered, so ``get_scorer``
+still raises ``ValueError`` for that one name, the same it raises for any other name
+it does not recognise. All four names in :data:`_ARMS` are attempted regardless: an
+unregistered name and a registered-but-unavailable one are both ADR-0013's "an arm
+that cannot initialise is recorded... not omitted," satisfied by the real cases
+rather than a stub.
 
 Every command here is local computation over :mod:`joinless.records`,
 :mod:`joinless.resolver`, :mod:`joinless.scoring`, :mod:`joinless.corpus`,
@@ -92,6 +95,7 @@ from joinless.evaluation import (
 )
 from joinless.measurement import (
     Unavailable,
+    measure_artifact_size,
     measure_cold_start,
     measure_peak_memory,
     measure_warm_latency,
@@ -104,12 +108,18 @@ from joinless.runrecord import (
     Environment,
     Hardware,
     Maybe,
+    ModelIdentity,
     RunAssembly,
     RuntimeVersions,
     build_evaluation_set_identity,
     write_record,
 )
-from joinless.scoring import ScorerUnavailable, ThresholdMatcher, get_scorer
+from joinless.scoring import (
+    ScorerUnavailable,
+    ThresholdMatcher,
+    get_artifact_paths,
+    get_scorer,
+)
 
 # Not a calibrated value (ADR-0011's calibration procedure needs labelled pairs;
 # neither `resolve` nor `compare`'s default has any). Deliberately conservative: for
@@ -274,16 +284,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 # --- benchmark ---------------------------------------------------------------
 
-# ADR-0008 names four arms; only "overlap" and "fuzzy" are registered in
-# joinless.scoring today (milestone M2). "embed-fp32" and "embed-int8" are attempted
-# here anyway — see the module docstring for why that is the real ADR-0013
-# "unavailable" case rather than a stub.
+# ADR-0008 names four arms. "overlap" and "fuzzy" are always registered;
+# "embed-fp32" is registered too (M3) but only available where
+# JOINLESS_MODEL_CACHE_DIR names a directory holding its checksummed artefact
+# (joinless.embedding); "embed-int8" remains unregistered. All four are attempted
+# regardless — see the module docstring for why an unregistered name and a
+# registered-but-unavailable one are both the real ADR-0013 "unavailable" case
+# rather than a stub.
 _ARMS: tuple[str, ...] = ("overlap", "fuzzy", "embed-fp32", "embed-int8")
 
 _WARMUP_COUNT = 5
 _REPETITION_COUNT = 20
 
-_SCHEMA = "benchmark-v1"
+_SCHEMA = "benchmark-v2"
 
 # ADR-0011 rule 4: "the expected winner per family is recorded before the run."
 # Reasoning per family, grounded in joinless.corpus's own module docstring and
@@ -301,9 +314,11 @@ _SCHEMA = "benchmark-v1"
 #   - near-miss negative: joinless.corpus's own docstring names this "the failure a
 #     classical, string-based arm is expected to be tempted by" — both overlap and
 #     fuzzy are expected to over-match here, so the arm expected to get it right is
-#     the one not yet registered. Naming it anyway keeps the pre-registration
-#     honest: the resulting contradiction says "the arm expected to win this family
-#     did not run," not "the wrong classical arm won."
+#     embed-fp32. Naming it anyway keeps the pre-registration honest even where
+#     embed-fp32 has no artefact to load (JOINLESS_MODEL_CACHE_DIR unset) and
+#     contributes no row: find_contradictions then compares overlap against fuzzy
+#     alone, and whichever of the two "wins" is correctly a contradiction — the arm
+#     expected to win this family did not run, not "the wrong classical arm won."
 #   - everything else (exact, formatting, abbreviation): RFC-0002's evaluation-set
 #     table marks these as not expected to separate the arms at all; overlap is
 #     named as the representative baseline.
@@ -385,20 +400,59 @@ def _hardware() -> Hardware:
     )
 
 
-def _runtime_versions() -> RuntimeVersions:
-    # No arm in this run constructs an ONNX Runtime session (only "overlap" and
-    # "fuzzy" are registered; see the module docstring), so its version is
-    # inapplicable rather than absent-and-uninteresting (ADR-0013).
+def _model_identity(arm: str) -> ModelIdentity | None:
+    """Which model ``arm`` loaded this run, or ``None`` for an arm that
+    carries no model at all — ``overlap`` and ``fuzzy`` (ADR-0003), and any
+    arm whose own ``get_scorer`` call has not already succeeded, which the
+    caller (:func:`_measure_arm`, the only one) is responsible for having
+    established before reaching here.
+
+    Imported lazily, at call time — mirroring :mod:`joinless.scoring`'s own
+    lazy reach into :mod:`joinless.embedding` (ADR-0014, ADR-0017) — so a
+    classical-only run, or a run in which ``embed-fp32`` could not
+    initialise, never imports :mod:`joinless.embedding` from here either.
+    """
+    if arm == "embed-fp32":
+        from joinless import embedding
+
+        return embedding.model_identity_fp32()
+    return None
+
+
+def _runtime_versions(*, model_identity: ModelIdentity | None) -> RuntimeVersions:
+    """``rapidfuzz`` is a base dependency (ADR-0014) so its version is always
+    read from installed-package metadata. ``onnxruntime`` is read a different
+    way, and only when ``model_identity`` says a neural arm actually loaded
+    one: :data:`sys.modules` already holds the exact module that arm's own
+    ``get_scorer`` call imported (:mod:`joinless.embedding`'s
+    ``load_fp32_scorer``), so ``onnxruntime.__version__`` names the runtime
+    this run actually used rather than whatever a separate metadata lookup
+    happens to find on the path. A run with no successful neural arm keeps
+    the version inapplicable (ADR-0013) — never absent-and-uninteresting,
+    and never guessed at from a package that was never imported.
+    """
+    if model_identity is not None:
+        import onnxruntime
+
+        onnxruntime_version = Maybe(value=onnxruntime.__version__, reason=None)
+    else:
+        onnxruntime_version = Maybe(value=None, reason="no neural arm in this run")
     return RuntimeVersions(
-        onnxruntime=Maybe(value=None, reason="no neural arm in this run"),
+        onnxruntime=onnxruntime_version,
         rapidfuzz=importlib.metadata.version("rapidfuzz"),
     )
 
 
-def _environment(power_mode: str) -> Environment:
+def _environment(
+    power_mode: str, *, model_identity: ModelIdentity | None
+) -> Environment:
+    if model_identity is not None:
+        model = Maybe(value=model_identity, reason=None)
+    else:
+        model = Maybe(value=None, reason="no neural arm in this run")
     return Environment(
         hardware=_hardware(),
-        runtime_versions=_runtime_versions(),
+        runtime_versions=_runtime_versions(model_identity=model_identity),
         power_mode=power_mode,
         # Single-threaded: no arm this module can run configures a thread pool or a
         # GPU/NPU execution provider (ADR-0006), and neither classical scorer
@@ -406,7 +460,9 @@ def _environment(power_mode: str) -> Environment:
         thread_count=1,
         warmup_count=_WARMUP_COUNT,
         repetition_count=_REPETITION_COUNT,
-        model=Maybe(value=None, reason="no neural arm in this run"),
+        model=model,
+        # embed-int8 remains unregistered (module docstring), so no run can yet
+        # produce a quantized-operator list.
         quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
     )
 
@@ -442,18 +498,21 @@ def _pool_corpora(corpora: Sequence[Corpus]) -> Corpus:
 
 def _measure_arm(
     arm: str, pooled: Corpus, left_name: str, right_name: str, power_mode: str
-) -> tuple[ArmResult, SelectedThreshold | None]:
+) -> tuple[ArmResult, SelectedThreshold | None, ModelIdentity | None]:
     """Run the full protocol for ``arm``, or mark it unavailable everywhere at
     once.
 
     Every field this returns is decided by exactly one ``get_scorer`` call:
-    succeeding runs threshold selection, sealed-test evaluation and all three
-    resource measurements; failing marks accuracy, warm latency, peak memory and
-    cold start unavailable with that one call's reason, without spawning a worker
-    to rediscover the same failure a second way — ADR-0013's rule is that the arm
-    is recorded, not how many times its unavailability gets independently
-    confirmed. No threshold is selected for an arm that never got this far, so it
-    contributes nothing to the run's ``selected_thresholds`` list.
+    succeeding runs threshold selection, sealed-test evaluation and all four
+    resource measurements; failing marks accuracy, warm latency, peak memory,
+    cold start and artifact size unavailable with that one call's reason,
+    without spawning a worker to rediscover the same failure a second way —
+    ADR-0013's rule is that the arm is recorded, not how many times its
+    unavailability gets independently confirmed. No threshold is selected for
+    an arm that never got this far, so it contributes nothing to the run's
+    ``selected_thresholds`` list. The third element is what ``arm`` loaded as
+    a model, if anything (:func:`_model_identity`) — ``None`` for the same
+    "never got this far" arms, and for every classical arm regardless.
     """
     try:
         scorer = get_scorer(arm)
@@ -465,7 +524,9 @@ def _measure_arm(
                 warm_latency=Unavailable(arm=arm, reason=reason),
                 peak_memory=Unavailable(arm=arm, reason=reason),
                 cold_start=Unavailable(arm=arm, reason=reason),
+                artifact_size=Unavailable(arm=arm, reason=reason),
             ),
+            None,
             None,
         )
 
@@ -481,14 +542,17 @@ def _measure_arm(
     )
     peak_memory = measure_peak_memory(arm, left_name, right_name, power_mode=power_mode)
     cold_start = measure_cold_start(arm, left_name, right_name)
+    artifact_size = measure_artifact_size(get_artifact_paths(arm))
     return (
         ArmResult(
             accuracy=accuracy,
             warm_latency=warm_latency,
             peak_memory=peak_memory,
             cold_start=cold_start,
+            artifact_size=artifact_size,
         ),
         selected,
+        _model_identity(arm),
     )
 
 
@@ -500,10 +564,11 @@ def _find_contradictions(
     :func:`joinless.evaluation.find_contradictions` — this function's own job
     is only to pick out which arms have a real per-family table to compare.
     An arm whose ``accuracy`` is :class:`~joinless.evaluation.InvalidRun`
-    (an unregistered scorer, or one whose dependency is missing) contributes
-    no row, which is what leaves ``find_contradictions``'s own "fewer than
-    two comparable arms" rule to skip a family such as "near-miss negative"
-    whose expected winner is an arm not yet registered (module docstring) —
+    (an unregistered scorer, or one whose dependency or artefact is
+    unavailable) contributes no row, which is what leaves
+    ``find_contradictions``'s own "fewer than two comparable arms" rule to
+    skip a family such as "near-miss negative" wherever its expected winner
+    is an arm that did not run in this environment (module docstring) —
     a fact this function does not re-decide, only feeds correctly.
     """
     reports: dict[str, EvaluationReport] = {
@@ -530,9 +595,10 @@ def _format_contradictions(contradictions: Sequence[Contradiction]) -> list[str]
         )
     ]
     for contradiction in contradictions:
+        actual = ", ".join(repr(arm) for arm in contradiction.actual_winners)
         lines.append(
             f"  {contradiction.family}: expected {contradiction.expected_winner!r} "
-            f"to win, actual winner was {contradiction.actual_winner!r}"
+            f"to win, actual winner(s): {actual}"
         )
     return lines
 
@@ -551,12 +617,21 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     assembly = RunAssembly(expected_winners=_EXPECTED_WINNERS)
     arm_results: dict[str, ArmResult] = {}
     selected_thresholds: list[SelectedThreshold] = []
+    # At most one arm on this branch ever loads a model (embed-fp32; embed-int8
+    # remains unregistered), so "the last one that reported an identity" and
+    # "the one that did" are the same arm — this will need revisiting once a
+    # second neural arm is registered and the two could disagree.
+    model_identity: ModelIdentity | None = None
     for arm in _ARMS:
-        result, selected = _measure_arm(arm, pooled, left_name, right_name, power_mode)
+        result, selected, identity = _measure_arm(
+            arm, pooled, left_name, right_name, power_mode
+        )
         assembly.add_arm(arm, result)
         arm_results[arm] = result
         if selected is not None:
             selected_thresholds.append(selected)
+        if identity is not None:
+            model_identity = identity
 
     # ADR-0011 rule 4 / issue #50: the pre-registered expectations are compared
     # against the actual outcome here, once, and the same value is both printed
@@ -567,7 +642,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
         schema=_SCHEMA,
         started_at=started_at,
         command=("joinless", "benchmark"),
-        environment=_environment(power_mode),
+        environment=_environment(power_mode, model_identity=model_identity),
         evaluation_set=evaluation_set,
         selected_thresholds=tuple(selected_thresholds),
         contradictions=contradictions,

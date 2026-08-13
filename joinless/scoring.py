@@ -23,16 +23,30 @@ against, not as a second production path — both call patterns must produce
 identical prepared values, or the hoist would be measuring two different
 computations rather than two ways of doing one.
 
-Two arms are implemented here. :class:`OverlapScorer` is the token-overlap
-coefficient inherited from the prior-art resolver: standard library only, and
-character-blind by construction (ADR-0003). :class:`FuzzyScorer` is the
-character-aware counterpart added because a transformer measured only against
-a character-blind heuristic proves nothing about the transformer (ADR-0008).
-Its dependency, ``rapidfuzz``, is imported only inside :class:`FuzzyScorer`,
-never at module scope, so that importing this module — and scoring with
-:class:`OverlapScorer` — needs nothing beyond the standard library. That is
-the same boundary ADR-0014 draws around the inference runtime, applied to the
-one arm here that has a dependency to keep out of the other's way.
+Two classical arms are implemented here. :class:`OverlapScorer` is the
+token-overlap coefficient inherited from the prior-art resolver: standard
+library only, and character-blind by construction (ADR-0003).
+:class:`FuzzyScorer` is the character-aware counterpart added because a
+transformer measured only against a character-blind heuristic proves nothing
+about the transformer (ADR-0008). Its dependency, ``rapidfuzz``, is imported
+only inside :class:`FuzzyScorer`, never at module scope, so that importing
+this module — and scoring with :class:`OverlapScorer` — needs nothing beyond
+the standard library. That is the same boundary ADR-0014 draws around the
+inference runtime, applied to the one arm here that has a dependency to keep
+out of the other's way.
+
+The ``embed-fp32`` arm is :class:`joinless.embedding.EmbeddingScorer`, not
+defined here — its dependencies (``onnxruntime``, ``tokenizers``) and its
+artefact are heavier than a lazy ``import`` inside one constructor can hide,
+so it gets its own module (ADR-0002, ADR-0014, ADR-0017). What lives here is
+the seam: :func:`_embed_fp32_probe`, :func:`_embed_fp32_factory` and
+:func:`_embed_fp32_artifact_paths` each import :mod:`joinless.embedding`
+lazily, at call time, exactly like
+:func:`_fuzzy_probe` imports ``rapidfuzz`` lazily — so a classical-only run
+never reaches :mod:`joinless.embedding`, let alone the inference runtime it
+eventually imports, and :mod:`joinless.embedding` is free to import
+``onnxruntime``/``tokenizers`` inside its own functions without either
+import ever becoming reachable from this module's top level.
 
 Both arms share one normalisation: casefold, then punctuation and
 underscores collapsed to a single space (not deleted — deleting would fuse
@@ -62,6 +76,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Generic, Protocol, TypeVar
 
 Prepared = TypeVar("Prepared")
@@ -268,18 +283,77 @@ def _fuzzy_probe() -> str | None:
     return None
 
 
+def _embed_fp32_probe() -> str | None:
+    """Import :mod:`joinless.embedding` here, at call time, not at module scope.
+
+    Mirrors :func:`_fuzzy_probe` exactly: a classical-only run never executes
+    this function's body (:func:`get_scorer` only calls a name's registered
+    probe when that name is requested), so a classical-only run never imports
+    :mod:`joinless.embedding` either — and that module, in turn, never
+    imports ``onnxruntime`` or ``tokenizers`` at its own module scope
+    (ADR-0014, ADR-0017). This is the check :func:`get_scorer` runs before it
+    will construct the fp32 embedding arm.
+    """
+    from joinless import embedding
+
+    return embedding.probe_fp32()
+
+
+def _embed_fp32_factory() -> Scorer[Any]:
+    """Constructed only after :func:`_embed_fp32_probe` has already returned
+    ``None`` for this same process (:func:`get_scorer`'s probe-then-factory
+    order) — artefact and dependency checks are not repeated here."""
+    from joinless import embedding
+
+    return embedding.load_fp32_scorer()
+
+
+def _no_artifact_paths() -> tuple[Path, ...]:
+    """Overlap and fuzzy carry no model artefact (ADR-0003): an explicit empty
+    tuple, not a call into :mod:`joinless.embedding` that happens to return
+    nothing — the two must stay distinguishable in what they *do*, not only
+    in what they return (issue #63)."""
+    return ()
+
+
+def _embed_fp32_artifact_paths() -> tuple[Path, ...]:
+    """Import :mod:`joinless.embedding` here, at call time, mirroring
+    :func:`_embed_fp32_probe` and :func:`_embed_fp32_factory` exactly — a
+    caller reaches this only through :func:`get_artifact_paths`, for the same
+    arm whose :func:`_embed_fp32_probe` has already run, so the lazy-import
+    boundary these two mirror is never bypassed here either (issue #63).
+    """
+    from joinless import embedding
+
+    return tuple(
+        requirement.path for requirement in embedding.artifact_requirements_fp32()
+    )
+
+
 @dataclass(frozen=True)
 class _Registration:
-    """One arm's constructor paired with the availability check that must
-    pass before :func:`get_scorer` will call it."""
+    """One arm's constructor, availability check, and artefact-file list
+    (issue #63) — everything :func:`get_scorer` and :func:`get_artifact_paths`
+    need, kept in the same one place per arm rather than a second registry a
+    future arm could add to without the first."""
 
     factory: Callable[[], Scorer[Any]]
     probe: Callable[[], str | None]
+    artifact_paths: Callable[[], tuple[Path, ...]]
 
 
 _SCORERS: Mapping[str, _Registration] = {
-    "overlap": _Registration(factory=OverlapScorer, probe=_overlap_probe),
-    "fuzzy": _Registration(factory=FuzzyScorer, probe=_fuzzy_probe),
+    "overlap": _Registration(
+        factory=OverlapScorer, probe=_overlap_probe, artifact_paths=_no_artifact_paths
+    ),
+    "fuzzy": _Registration(
+        factory=FuzzyScorer, probe=_fuzzy_probe, artifact_paths=_no_artifact_paths
+    ),
+    "embed-fp32": _Registration(
+        factory=_embed_fp32_factory,
+        probe=_embed_fp32_probe,
+        artifact_paths=_embed_fp32_artifact_paths,
+    ),
 }
 
 
@@ -307,3 +381,27 @@ def get_scorer(name: str) -> Scorer[Any]:
     if reason is not None:
         raise ScorerUnavailable(name, reason)
     return registration.factory()
+
+
+def get_artifact_paths(name: str) -> tuple[Path, ...]:
+    """The on-disk artefact files ``name``'s scorer depends on — an empty
+    tuple for an arm with no model, such as ``overlap`` and ``fuzzy``
+    (ADR-0013: the classical arms' zero footprint is a fact this returns
+    explicitly, not an absence a caller has to infer).
+
+    Looked up through :data:`_SCORERS`, the same registry :func:`get_scorer`
+    uses, so artefact-path knowledge for an arm lives in the one place its
+    construction knowledge already does. Intended for a caller whose
+    ``get_scorer(name)`` call already succeeded — an unrecognised name is
+    still a :class:`ValueError`, matching :func:`get_scorer`, but this
+    function does not itself check whether the arm can initialise; that is
+    what ``get_scorer`` is for.
+    """
+    try:
+        registration = _SCORERS[name]
+    except KeyError:
+        available = ", ".join(sorted(_SCORERS))
+        raise ValueError(
+            f"Unknown scorer {name!r}. Available scorers: {available}."
+        ) from None
+    return registration.artifact_paths()

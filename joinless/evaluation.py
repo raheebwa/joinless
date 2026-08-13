@@ -137,10 +137,23 @@ class EvaluationReport:
     aggregate itself, not one that depends on where it sits in this type.
     ``aggregate`` is never built from anything but ``per_family`` — see
     :func:`_aggregate`.
+
+    ``n_pairs`` is how many pairs this report evaluated — declared last
+    because, unlike ``per_family``/``aggregate``'s ordering rule, no issue ties
+    its position to anything a reader parses positionally. It is also the
+    batch size issue #61's third bullet asks recorded: :func:`_predict` calls
+    ``matcher.scorer.prepare_all`` exactly twice per evaluation, once with
+    every pair's left name and once with every pair's right name, so
+    ``len(pairs)`` **is** the size of each of those two calls under this
+    arm's batching contract (:mod:`joinless.scoring`'s module docstring,
+    ADR-0009) — not a second figure computed independently of it, which is
+    what would let this field and the batch ``prepare_all`` actually saw
+    drift apart.
     """
 
     per_family: tuple[FamilyResult, ...]
     aggregate: AggregateResult
+    n_pairs: int
 
 
 def _predict(
@@ -248,7 +261,9 @@ def evaluate(
         )
         for family, indices in indices_by_family.items()
     )
-    return EvaluationReport(per_family=per_family, aggregate=_aggregate(per_family))
+    return EvaluationReport(
+        per_family=per_family, aggregate=_aggregate(per_family), n_pairs=len(pairs)
+    )
 
 
 def _pairs_for_role(corpus: Corpus, role: Role) -> list[LabelledPair]:
@@ -449,28 +464,42 @@ class ExpectedWinners:
 
 @dataclass(frozen=True, slots=True)
 class Contradiction:
-    """One family whose actual best-F1 arm was not the pre-registered expectation
+    """One family where the pre-registered arm did not reach the top F1 score
     (ADR-0011 rule 4) — "a finding... not a footnote": a first-class value in a
-    tuple :func:`find_contradictions` returns, never text folded into a log line."""
+    tuple :func:`find_contradictions` returns, never text folded into a log line.
+
+    ``actual_winners`` holds every arm that reached that top score, sorted
+    ascending by name. A single-element tuple means one arm beat the
+    expectation outright; more than one means the arms that beat it also tied
+    with each other — reported as the tie it is, rather than collapsed to
+    whichever of them a mapping happens to iterate first.
+    """
 
     family: str
     expected_winner: str
-    actual_winner: str
+    actual_winners: tuple[str, ...]
 
 
 def find_contradictions(
     expected: ExpectedWinners, reports: Mapping[str, EvaluationReport]
 ) -> tuple[Contradiction, ...]:
-    """Every family in ``expected`` whose actual best-scoring arm, among
-    ``reports``, was not the one pre-registered (issue #50), in the order
-    ``expected`` records them.
+    """Every family in ``expected`` where the pre-registered arm did not reach
+    the top F1 score, among ``reports`` (issue #50), in the order ``expected``
+    records them.
 
-    "Actual best-scoring" compares each arm's F1 for that family, skipping an
-    arm that did not report the family at all or reported an undefined F1 there
-    — an undefined figure is not evidence the arm lost, only that no comparison
-    can be drawn from it (ADR-0013). A family fewer than two arms can be compared
-    on is skipped entirely: winning is only meaningful against a competitor, so
-    this is neither a contradiction nor a confirmation, just nothing to report.
+    A contradiction is the pre-registered arm failing to reach the top score for
+    that family — however many arms are above it, and whether or not those arms
+    tie with each other. The expected arm reaching the top, alone or tied with
+    one or more other arms, is the expectation holding, not a case reported here.
+
+    Comparing requires a real figure on both sides. An arm that did not report
+    the family at all, or reported an undefined F1 there, contributes no
+    comparable score — an undefined figure is not evidence the arm lost, only
+    that no comparison can be drawn from it (ADR-0013). A family with fewer than
+    two comparable arms is skipped entirely, and so is one where the
+    pre-registered arm itself has no comparable score there: winning is only
+    meaningful against a competitor, and against a figure the expected arm
+    actually has.
     """
     contradictions: list[Contradiction] = []
     for family, expected_winner in expected.winners.items():
@@ -479,15 +508,19 @@ def find_contradictions(
             row = next((f for f in report.per_family if f.family == family), None)
             if row is not None and row.f1.value is not None:
                 scores[arm] = row.f1.value
-        if len(scores) < 2:
+        if len(scores) < 2 or expected_winner not in scores:
             continue
-        actual_winner = max(scores, key=scores.__getitem__)
-        if actual_winner != expected_winner:
-            contradictions.append(
-                Contradiction(
-                    family=family,
-                    expected_winner=expected_winner,
-                    actual_winner=actual_winner,
-                )
+        best_score = max(scores.values())
+        if scores[expected_winner] == best_score:
+            continue
+        actual_winners = tuple(
+            sorted(arm for arm, score in scores.items() if score == best_score)
+        )
+        contradictions.append(
+            Contradiction(
+                family=family,
+                expected_winner=expected_winner,
+                actual_winners=actual_winners,
             )
+        )
     return tuple(contradictions)

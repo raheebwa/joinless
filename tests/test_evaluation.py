@@ -67,7 +67,29 @@ def test_evaluation_report_presents_per_family_before_aggregate() -> None:
     from joinless.evaluation import EvaluationReport
 
     names = [f.name for f in fields(EvaluationReport)]
-    assert names == ["per_family", "aggregate"]
+    assert names == ["per_family", "aggregate", "n_pairs"]
+
+
+def test_evaluate_records_n_pairs_as_the_batch_size_of_its_prepare_all_calls() -> None:
+    """Issue #61's third bullet: "batch size is a recorded parameter, since it
+    moves the result." ``evaluate`` calls ``matcher.scorer.prepare_all`` exactly
+    twice - once with every pair's left name, once with every pair's right name
+    (``_predict``) - so the length of ``pairs`` *is* the size of each of those
+    two calls. ``n_pairs`` is that same count, not a second figure that could
+    disagree with it.
+    """
+    from joinless.evaluation import evaluate
+
+    pairs = [
+        _pair("1", "Acme Traders", "Acme Traders", 1, "exact"),
+        _pair("2", "Acme Traders", "Zeta Motors", 0, "near-miss negative"),
+        _pair("3", "Acme Traders", "Acme Trading Co", 1, "abbreviation"),
+    ]
+    matcher = ThresholdMatcher(scorer=OverlapScorer(), threshold=0.5)
+
+    report = evaluate(pairs, matcher)
+
+    assert report.n_pairs == 3
 
 
 # --- undefined precision/recall (issue #51) -----------------------------------------
@@ -534,7 +556,7 @@ def _report_with_f1(family: str, value: float):  # type: ignore[no-untyped-def]
         f1=row.f1,
         derivation=_AGGREGATE_DERIVATION,
     )
-    return EvaluationReport(per_family=(row,), aggregate=aggregate)
+    return EvaluationReport(per_family=(row,), aggregate=aggregate, n_pairs=1)
 
 
 def test_expected_winners_cannot_be_edited_by_reassigning_the_mapping() -> None:
@@ -598,6 +620,7 @@ def test_find_contradictions_names_every_family_that_contradicts_the_expectation
                 ),
             ),
             aggregate=reports["overlap"].aggregate,
+            n_pairs=2,
         ),
         "fuzzy": EvaluationReport(
             per_family=(
@@ -613,6 +636,7 @@ def test_find_contradictions_names_every_family_that_contradicts_the_expectation
                 ),
             ),
             aggregate=reports["fuzzy"].aggregate,
+            n_pairs=2,
         ),
     }
 
@@ -638,6 +662,110 @@ def test_find_contradictions_confirms_a_family_that_matches_the_expectation() ->
     assert contradictions == ()
 
 
+def test_find_contradictions_confirms_a_family_where_the_expected_arm_ties_for_top() -> (
+    None
+):
+    """A three-way tie at the top, with the expected arm among the tied scorers,
+    is a no-contradiction case for the same reason a clean win is: the expected
+    arm reached the top score. Nothing here turns on whether other arms also
+    reached it or on the order ``reports`` happens to iterate in — this pins that
+    an implementation reading ``max(scores, key=...)`` for an "actual winner"
+    cannot silently promote one tied arm over the expected one just because it
+    sorts first.
+    """
+    from joinless.evaluation import ExpectedWinners, find_contradictions
+
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    reports = {
+        "fuzzy": _report_with_f1("exact", 1.0),
+        "overlap": _report_with_f1("exact", 1.0),
+        "embed-fp32": _report_with_f1("exact", 1.0),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert contradictions == ()
+
+
+def test_find_contradictions_confirms_a_family_where_the_expected_arm_wins_alone() -> (
+    None
+):
+    from joinless.evaluation import ExpectedWinners, find_contradictions
+
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    reports = {
+        "overlap": _report_with_f1("exact", 1.0),
+        "fuzzy": _report_with_f1("exact", 0.4),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert contradictions == ()
+
+
+def test_find_contradictions_confirms_a_family_where_the_expected_arm_ties_with_one_other() -> (
+    None
+):
+    from joinless.evaluation import ExpectedWinners, find_contradictions
+
+    expected = ExpectedWinners(winners={"exact": "overlap"})
+    reports = {
+        "overlap": _report_with_f1("exact", 0.9),
+        "fuzzy": _report_with_f1("exact", 0.9),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert contradictions == ()
+
+
+def test_find_contradictions_reports_the_expected_arm_beaten_by_exactly_one_arm() -> (
+    None
+):
+    from joinless.evaluation import ExpectedWinners, find_contradictions
+
+    expected = ExpectedWinners(winners={"transliteration": "fuzzy"})
+    reports = {
+        "fuzzy": _report_with_f1("transliteration", 0.961),
+        "overlap": _report_with_f1("transliteration", 1.0),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert len(contradictions) == 1
+    contradiction = contradictions[0]
+    assert contradiction.family == "transliteration"
+    assert contradiction.expected_winner == "fuzzy"
+    assert contradiction.actual_winners == ("overlap",)
+
+
+def test_find_contradictions_reports_the_expected_arm_beaten_by_two_arms_tied_with_each_other() -> (
+    None
+):
+    """The live case this rule exists for: the expected arm is strictly beaten,
+    and the two arms that beat it happen to tie with each other. Whether those
+    two tie says nothing about whether the expectation held — it did not, and
+    both of the arms that beat it are named, in a deterministic order, rather
+    than the tie between them being read as "no contradiction."
+    """
+    from joinless.evaluation import ExpectedWinners, find_contradictions
+
+    expected = ExpectedWinners(winners={"transliteration": "fuzzy"})
+    reports = {
+        "overlap": _report_with_f1("transliteration", 1.0),
+        "fuzzy": _report_with_f1("transliteration", 0.961),
+        "embed-fp32": _report_with_f1("transliteration", 1.0),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert len(contradictions) == 1
+    contradiction = contradictions[0]
+    assert contradiction.family == "transliteration"
+    assert contradiction.expected_winner == "fuzzy"
+    assert contradiction.actual_winners == ("embed-fp32", "overlap")
+
+
 def test_find_contradictions_skips_a_family_with_fewer_than_two_defined_scores() -> (
     None
 ):
@@ -660,6 +788,47 @@ def test_find_contradictions_skips_a_family_neither_arm_reported() -> None:
     reports = {
         "overlap": _report_with_f1("abbreviation", 0.3),
         "fuzzy": _report_with_f1("abbreviation", 0.9),
+    }
+
+    contradictions = find_contradictions(expected, reports)
+
+    assert contradictions == ()
+
+
+def test_find_contradictions_skips_a_family_where_the_expected_arm_has_no_comparable_figure() -> (
+    None
+):
+    """Two other arms have a real, comparable score for this family, but the
+    expected arm's own F1 is undefined there (ADR-0013) - an undefined figure is
+    not evidence the expected arm lost, so there is nothing to compare it
+    against and the family is skipped, the same as a family fewer than two arms
+    reported on."""
+    from joinless.evaluation import (
+        EvaluationReport,
+        ExpectedWinners,
+        FamilyResult,
+        find_contradictions,
+    )
+
+    expected = ExpectedWinners(winners={"abbreviation": "fuzzy"})
+    undefined_metric = Metric(value=None, undefined_reason="no predicted positives")
+    fuzzy_row = FamilyResult(
+        family="abbreviation",
+        precision=undefined_metric,
+        recall=undefined_metric,
+        f1=undefined_metric,
+        true_positives=0,
+        predicted_positives=0,
+        actual_positives=1,
+    )
+    reports = {
+        "overlap": _report_with_f1("abbreviation", 0.5),
+        "embed-fp32": _report_with_f1("abbreviation", 0.9),
+        "fuzzy": EvaluationReport(
+            per_family=(fuzzy_row,),
+            aggregate=_report_with_f1("abbreviation", 0.5).aggregate,
+            n_pairs=1,
+        ),
     }
 
     contradictions = find_contradictions(expected, reports)

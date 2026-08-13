@@ -42,6 +42,7 @@ from joinless.evaluation import (
     EvaluationReport,
     ExpectedWinners,
     InvalidRun,
+    Metric,
     SelectedThreshold,
 )
 from joinless.measurement import ColdStartPhases, PeakMemory, Unavailable, WarmLatency
@@ -97,17 +98,20 @@ class Hardware:
 
 @dataclass(frozen=True, slots=True)
 class ModelIdentity:
-    """The model identity, revision and checksum RFC-0002 Method step 5
-    requires (benchmarks/README.md: "Model identity, revision and checksum,
-    where applicable"). Wrapped in a :class:`Maybe` on :class:`Environment`
+    """The model identity, revision, checksum and licence RFC-0002 Method
+    step 5 requires (benchmarks/README.md: "Model identity, revision and
+    checksum, where applicable") and issue #59's fourth bullet requires
+    alongside them ("the model card's licence is recorded alongside the
+    artefact identity"). Wrapped in a :class:`Maybe` on :class:`Environment`
     rather than making each field its own ``Maybe`` — when no arm in a run
-    loads a model, all three are inapplicable for the same one reason, not
-    three independently missing values.
+    loads a model, all four are inapplicable for the same one reason, not
+    four independently missing values.
     """
 
     model_id: str
     revision: str
     checksum_sha256: str
+    license: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,17 +170,31 @@ class EvaluationSetIdentity:
 @dataclass(frozen=True, slots=True)
 class ArmResult:
     """Everything one arm contributed to a run: its accuracy report and its
-    three resource measurements (RFC-0002 Metrics table), each either its
+    four resource measurements (RFC-0002 Metrics table), each either its
     measured value or an ADR-0013 outcome explaining why not —
     :class:`~joinless.evaluation.InvalidRun` for accuracy,
     :class:`~joinless.measurement.Unavailable` for a measurement — never
     omitted and never coerced into a number.
+
+    ``artifact_size`` is typed :class:`~joinless.evaluation.Metric`, not one
+    of the three dedicated measurement dataclasses its siblings use: unlike
+    peak memory or cold start, this figure carries no extra fields beyond a
+    number and why there might not be one, which is exactly what ``Metric``
+    already is (issue #63) — a second, near-identical dataclass would be a
+    third shape for the same "a value that may be undefined" idea
+    :class:`~joinless.evaluation.Metric` and :class:`Maybe` already cover
+    between them. ``Unavailable`` is still the outer alternative, for an arm
+    that never got far enough to be asked: the classical arms *do*
+    initialise and their ``Metric`` is defined-undefined (a real "no
+    artefact" fact); an arm whose ``get_scorer`` call itself failed never
+    reaches that question at all.
     """
 
     accuracy: EvaluationReport | InvalidRun
     warm_latency: WarmLatency | Unavailable
     peak_memory: PeakMemory | Unavailable
     cold_start: ColdStartPhases | Unavailable
+    artifact_size: Metric | Unavailable
 
 
 @dataclass(frozen=True, slots=True)
