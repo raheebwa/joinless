@@ -54,10 +54,16 @@ import sys
 
 import pytest
 
+# The packages the `neural` extra installs, and the whole of what may not be reachable
+# from a base-profile import (ADR-0014 for the runtime, ADR-0017 for the tokenizer).
+# Named once: the probe below and the failure message both read this, so a package added
+# here cannot be covered by one and not reported by the other.
+_OFFENDING_PREFIXES = ("onnxruntime", "tokenizers", "onnx")
+
 _PROBE_TEMPLATE = """
 import sys
 import {module_name}  # noqa: F401
-_offending_prefixes = ("onnxruntime", "tokenizers")
+_offending_prefixes = {offending_prefixes!r}
 offenders = sorted(
     m for m in sys.modules
     if m in _offending_prefixes or m.startswith(tuple(p + "." for p in _offending_prefixes))
@@ -86,7 +92,9 @@ def _discovered_module_names() -> list[str]:
 
 
 def _run_probe(module_name: str) -> subprocess.CompletedProcess[str]:
-    probe = _PROBE_TEMPLATE.format(module_name=module_name)
+    probe = _PROBE_TEMPLATE.format(
+        module_name=module_name, offending_prefixes=_OFFENDING_PREFIXES
+    )
     return subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True,
@@ -102,6 +110,6 @@ def test_importing_a_joinless_module_never_initialises_the_runtime_or_tokenizer(
     result = _run_probe(module_name)
 
     assert result.returncode == 0, (
-        f"importing {module_name!r} pulled onnxruntime or tokenizers into "
+        f"importing {module_name!r} pulled one of {_OFFENDING_PREFIXES} into "
         f"sys.modules: {result.stdout.strip() or result.stderr.strip()}"
     )
