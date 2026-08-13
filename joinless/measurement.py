@@ -173,6 +173,24 @@ def _measure(
     return payload
 
 
+def _percentile(data: Sequence[float], fraction: float) -> float:
+    """The one percentile convention every repeated-sample metric in this
+    module shares (RFC-0002 Method step 3: "repeat and report the
+    distribution, never a single run"). A module-level function rather than
+    logic re-typed inline in each worker script, so ``_PREPARATION_COST_SCRIPT``
+    (issue #103) computes p50/p99 exactly the way ``_WARM_LATENCY_SCRIPT``
+    already does, both importing this one implementation, instead of the
+    formula existing twice and risking the two drifting apart.
+
+    Clamped at the last index rather than indexing past it — ``int(fraction *
+    len(data))`` reaches ``len(data)`` exactly when ``fraction`` is ``1.0``,
+    which would be an out-of-range index into ``ordered`` were it not
+    clamped.
+    """
+    ordered = sorted(data)
+    return ordered[min(len(ordered) - 1, int(fraction * len(ordered)))]
+
+
 # Reads its parameters from JOINLESS_MEASURE_PARAMS and prints exactly one
 # line of JSON (see _run_in_child). get_scorer's two documented failure modes
 # — an unknown arm name and a known arm with a missing dependency (ADR-0013,
@@ -185,6 +203,7 @@ import os
 import time
 
 import joinless.scoring as scoring
+from joinless.measurement import _percentile
 
 params = json.loads(os.environ["JOINLESS_MEASURE_PARAMS"])
 try:
@@ -202,10 +221,6 @@ else:
         _start = time.perf_counter()
         scorer.score(left, right)
         durations.append(time.perf_counter() - _start)
-
-    def _percentile(data, fraction):
-        ordered = sorted(data)
-        return ordered[min(len(ordered) - 1, int(fraction * len(ordered)))]
 
     print(json.dumps({
         "status": "ok",
@@ -290,7 +305,10 @@ def _preparation_costs(
     right_names: Sequence[str],
     left_indices: Sequence[int],
     right_indices: Sequence[int],
-) -> tuple[float, float]:
+    *,
+    warmup_count: int,
+    repetition_count: int,
+) -> tuple[list[float], list[float]]:
     """Time both preparation paths for an already-constructed ``scorer``,
     over :class:`~joinless.records.Record` objects rebuilt from
     ``left_names``/``right_names`` and the ``(left_indices, right_indices)``
@@ -310,15 +328,26 @@ def _preparation_costs(
     Importable and callable directly, outside the isolated worker, which is
     what makes that delegation testable in-process without paying for a
     subprocess spawn; ``_PREPARATION_COST_SCRIPT`` calls this same function,
-    for real, inside a fresh interpreter, purely to get a realistic
-    wall-clock figure (RFC-0002 Method step 7).
+    for real, inside a fresh interpreter, purely to get realistic wall-clock
+    figures (RFC-0002 Method step 7).
 
-    The one ``prepare`` call before either timed section runs past runtime
-    start-up cost (import, lazy graph load) — measured separately by
-    :func:`measure_cold_start`, so folding it into hoisted or naive here
-    would double-count it (RFC-0002 Method step 2). Both timed sections
-    share this single warm-up rather than each getting their own, so
-    neither path is measured any warmer than the other.
+    A single call of either path is one draw, not a measurement (issue
+    #103: seven direct samples of a smaller workload gave ratios from 0.89
+    to 1.14, with the hoisted path occasionally measuring *slower* than its
+    control — noise, reported as if it were signal). Each path is therefore
+    run ``warmup_count`` times, discarded, then ``repetition_count`` times,
+    timed — the same discard-then-collect discipline
+    :data:`_WARM_LATENCY_SCRIPT` already applies to ``score``, applied here
+    to ``prepare_hoisted``/``prepare_naive`` instead of a second convention
+    for "repeat and report the distribution" (RFC-0002 Method step 3). The
+    two paths get their own warm-up rather than sharing one: a batched
+    ``prepare_all`` call and a loop of per-comparison ``prepare`` calls are
+    different access patterns, and only running each pattern itself brings
+    it to steady state. Nothing here computes a percentile — this function
+    returns the raw per-repetition durations for each path, and
+    ``_PREPARATION_COST_SCRIPT`` reduces them with the same
+    :func:`_percentile` :data:`_WARM_LATENCY_SCRIPT` reduces its own with,
+    so both metrics use one summarising function, not two.
     """
     left_records = [
         Record(source="preparation-cost", ordinal=index, name=name)
@@ -333,17 +362,23 @@ def _preparation_costs(
         for left_index, right_index in zip(left_indices, right_indices, strict=True)
     ]
 
-    scorer.prepare(left_names[0])
+    for _ in range(warmup_count):
+        resolver.prepare_hoisted(scorer, left_records, right_records)
+    hoisted_durations = []
+    for _ in range(repetition_count):
+        start = time.perf_counter()
+        resolver.prepare_hoisted(scorer, left_records, right_records)
+        hoisted_durations.append(time.perf_counter() - start)
 
-    start = time.perf_counter()
-    resolver.prepare_hoisted(scorer, left_records, right_records)
-    hoisted_seconds = time.perf_counter() - start
+    for _ in range(warmup_count):
+        resolver.prepare_naive(scorer, pairs)
+    naive_durations = []
+    for _ in range(repetition_count):
+        start = time.perf_counter()
+        resolver.prepare_naive(scorer, pairs)
+        naive_durations.append(time.perf_counter() - start)
 
-    start = time.perf_counter()
-    resolver.prepare_naive(scorer, pairs)
-    naive_seconds = time.perf_counter() - start
-
-    return hoisted_seconds, naive_seconds
+    return hoisted_durations, naive_durations
 
 
 _PREPARATION_COST_SCRIPT = """
@@ -351,7 +386,7 @@ import json
 import os
 
 import joinless.scoring as scoring
-from joinless.measurement import _preparation_costs
+from joinless.measurement import _percentile, _preparation_costs
 
 params = json.loads(os.environ["JOINLESS_MEASURE_PARAMS"])
 try:
@@ -359,17 +394,21 @@ try:
 except (ValueError, scoring.ScorerUnavailable) as exc:
     print(json.dumps({"status": "unavailable", "reason": str(exc)}))
 else:
-    hoisted_seconds, naive_seconds = _preparation_costs(
+    hoisted_durations, naive_durations = _preparation_costs(
         scorer,
         params["left_names"],
         params["right_names"],
         params["left_indices"],
         params["right_indices"],
+        warmup_count=params["warmup_count"],
+        repetition_count=params["repetition_count"],
     )
     print(json.dumps({
         "status": "ok",
-        "hoisted_seconds": hoisted_seconds,
-        "naive_seconds": naive_seconds,
+        "hoisted_p50_seconds": _percentile(hoisted_durations, 0.50),
+        "hoisted_p99_seconds": _percentile(hoisted_durations, 0.99),
+        "naive_p50_seconds": _percentile(naive_durations, 0.50),
+        "naive_p99_seconds": _percentile(naive_durations, 0.99),
     }))
 """
 
@@ -382,25 +421,42 @@ class PreparationCost:
     (ADR-0009: "a hoist speed-up quoted without the occupancy that produced
     it cannot be transferred to any other dataset").
 
-    ``hoisted_seconds`` times ``prepare_all`` called once per side, batched
-    — the production pattern ADR-0009 requires. ``naive_seconds`` times
-    ``prepare`` called fresh for both records of every comparison in
+    Reported at the median and the 99th percentile, over repeated
+    warmed-up samples of each path — the same p50/p99 shape
+    :class:`WarmLatency` already establishes, not a second convention
+    (issue #103). A single draw of either path is not a measurement:
+    preparation cost for a small workload is itself small, so scheduling
+    noise is a large fraction of it, and seven direct samples at a smaller
+    workload gave hoist ratios from 0.89 to 1.14 — at the low end the
+    hoisted path measured *slower* than its naive control. ``..._p50_seconds``
+    is the typical cost a reader comparing arms should compare; ``..._p99_seconds``
+    is the tail, exactly as RFC-0002's Metrics table gives the same reason
+    for warm scoring's own p99 ("what a user feels").
+
+    ``hoisted_p50_seconds``/``hoisted_p99_seconds`` time ``prepare_all``
+    called once per side, batched — the production pattern ADR-0009
+    requires. ``naive_p50_seconds``/``naive_p99_seconds`` time ``prepare``
+    called fresh for both records of every comparison in
     ``comparison_count``, reproducing the redundant recomputation the hoist
     removes. Both are timed in the same isolated worker (RFC-0002 Method
     step 7 names "preparation cost" alongside cold start, warm scoring and
-    peak RSS as a metric requiring isolation), sharing one warm-up so
-    neither path is measured any warmer than the other.
+    peak RSS as a metric requiring isolation).
 
-    ``record_count`` and ``comparison_count`` travel with the figures for
-    the same reason ``WarmLatency`` carries its own ``warmup_count`` and
-    ``repetition_count``: a reader holding one ``PreparationCost`` alone can
-    see what dataset produced it without cross-referencing another part of
-    the run record.
+    ``warmup_count`` and ``repetition_count`` travel with the figures for
+    the same reason :class:`WarmLatency` carries its own: a reader holding
+    one ``PreparationCost`` alone can tell how it was made, not only what it
+    says. ``record_count`` and ``comparison_count`` travel with them too, so
+    a reader can also see what dataset produced it without cross-referencing
+    another part of the run record.
     """
 
     arm: str
-    hoisted_seconds: float
-    naive_seconds: float
+    hoisted_p50_seconds: float
+    hoisted_p99_seconds: float
+    naive_p50_seconds: float
+    naive_p99_seconds: float
+    warmup_count: int
+    repetition_count: int
     record_count: int
     comparison_count: int
 
@@ -411,16 +467,21 @@ def measure_preparation_cost(
     right_names: Sequence[str],
     comparison_pairs: Sequence[tuple[int, int]],
     *,
+    warmup_count: int,
+    repetition_count: int,
     artifact: ArtifactRequirement | None = None,
 ) -> PreparationCost | Unavailable:
     """Hoisted vs naive preparation cost for ``arm`` over
     ``comparison_pairs`` — each pair a ``(left_index, right_index)`` into
     ``left_names``/``right_names`` — in a fresh isolated worker (RFC-0002
-    Method step 7, issue #66).
+    Method step 7, issue #66), sampled repeatedly after warm-up the same way
+    :func:`measure_warm_latency` already samples ``score`` (issue #103).
 
     ``left_names``, ``right_names`` and ``comparison_pairs`` must each be
-    non-empty — validated before anything is spawned, so a caller error is a
-    ``ValueError`` here rather than a confusing shape from the worker.
+    non-empty, ``repetition_count`` must be at least 1 and ``warmup_count``
+    must not be negative — all validated before anything is spawned, so a
+    caller error is a ``ValueError`` here rather than a confusing shape from
+    the worker.
     """
     if not left_names:
         raise ValueError("left_names must not be empty")
@@ -428,6 +489,10 @@ def measure_preparation_cost(
         raise ValueError("right_names must not be empty")
     if not comparison_pairs:
         raise ValueError("comparison_pairs must not be empty")
+    if repetition_count < 1:
+        raise ValueError("repetition_count must be at least 1")
+    if warmup_count < 0:
+        raise ValueError("warmup_count must not be negative")
 
     params = {
         "arm": arm,
@@ -435,14 +500,20 @@ def measure_preparation_cost(
         "right_names": list(right_names),
         "left_indices": [pair[0] for pair in comparison_pairs],
         "right_indices": [pair[1] for pair in comparison_pairs],
+        "warmup_count": warmup_count,
+        "repetition_count": repetition_count,
     }
     result = _measure(arm, artifact, _PREPARATION_COST_SCRIPT, params)
     if isinstance(result, Unavailable):
         return result
     return PreparationCost(
         arm=arm,
-        hoisted_seconds=cast(float, result["hoisted_seconds"]),
-        naive_seconds=cast(float, result["naive_seconds"]),
+        hoisted_p50_seconds=cast(float, result["hoisted_p50_seconds"]),
+        hoisted_p99_seconds=cast(float, result["hoisted_p99_seconds"]),
+        naive_p50_seconds=cast(float, result["naive_p50_seconds"]),
+        naive_p99_seconds=cast(float, result["naive_p99_seconds"]),
+        warmup_count=warmup_count,
+        repetition_count=repetition_count,
         record_count=len(left_names) + len(right_names),
         comparison_count=len(comparison_pairs),
     )

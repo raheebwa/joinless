@@ -83,6 +83,26 @@ def test_run_in_child_raises_child_failed_when_the_worker_prints_no_json() -> No
         _run_in_child("print('not json')", {})
 
 
+# --- _percentile(): the one percentile convention every repeated-sample metric in
+# this module shares (RFC-0002 Method step 3), factored out so
+# ``_PREPARATION_COST_SCRIPT`` computes p50/p99 the same way ``_WARM_LATENCY_SCRIPT``
+# already does rather than defining the formula a second time (issue #103) --------
+
+from joinless.measurement import _percentile
+
+
+def test_percentile_p50_of_an_odd_length_series_is_its_middle_value() -> None:
+    assert _percentile([3.0, 1.0, 2.0], 0.50) == 2.0
+
+
+def test_percentile_p99_of_a_single_value_is_that_value() -> None:
+    assert _percentile([0.5], 0.99) == 0.5
+
+
+def test_percentile_clamps_to_the_last_value_rather_than_indexing_past_it() -> None:
+    assert _percentile([1.0, 2.0, 3.0, 4.0], 0.99) == 4.0
+
+
 # --- measure_warm_latency(): p50/p99 per comparison, per arm (issue #54) -----------
 
 from joinless.measurement import Unavailable, measure_warm_latency
@@ -194,18 +214,31 @@ def test_measure_warm_latency_runs_when_the_artifact_matches(tmp_path: Path) -> 
 from joinless.measurement import measure_preparation_cost
 
 
-def test_measure_preparation_cost_reports_both_paths_for_a_real_arm() -> None:
+def test_measure_preparation_cost_reports_percentiles_and_counts_for_a_real_arm() -> (
+    None
+):
+    """Issue #103: a single draw is replaced by repeated, warmed-up sampling
+    over both paths, reported the same way ``measure_warm_latency`` reports
+    warm scoring — p50 and p99, with ``warmup_count``/``repetition_count``
+    travelling on the value so a reader holding it alone knows how it was
+    made."""
     result = measure_preparation_cost(
         "overlap",
         ["Acme Traders", "Rocket Fuel Traders"],
         ["Acme Traders Ltd", "Zephyr Logistics"],
         [(0, 0), (0, 1), (1, 0), (1, 1)],
+        warmup_count=2,
+        repetition_count=5,
     )
 
     assert not isinstance(result, Unavailable)
     assert result.arm == "overlap"
-    assert result.hoisted_seconds >= 0.0
-    assert result.naive_seconds >= 0.0
+    assert result.warmup_count == 2
+    assert result.repetition_count == 5
+    assert result.hoisted_p50_seconds >= 0.0
+    assert result.hoisted_p99_seconds >= result.hoisted_p50_seconds
+    assert result.naive_p50_seconds >= 0.0
+    assert result.naive_p99_seconds >= result.naive_p50_seconds
     assert result.record_count == 4
     assert result.comparison_count == 4
 
@@ -218,6 +251,8 @@ def test_measure_preparation_cost_is_unavailable_for_an_arm_that_cannot_initiali
         ["Acme Traders"],
         ["Acme Traders Ltd"],
         [(0, 0)],
+        warmup_count=0,
+        repetition_count=1,
     )
 
     assert isinstance(result, Unavailable)
@@ -227,17 +262,62 @@ def test_measure_preparation_cost_is_unavailable_for_an_arm_that_cannot_initiali
 
 def test_measure_preparation_cost_rejects_empty_left_names() -> None:
     with pytest.raises(ValueError, match="left_names"):
-        measure_preparation_cost("overlap", [], ["Acme Traders Ltd"], [(0, 0)])
+        measure_preparation_cost(
+            "overlap",
+            [],
+            ["Acme Traders Ltd"],
+            [(0, 0)],
+            warmup_count=0,
+            repetition_count=1,
+        )
 
 
 def test_measure_preparation_cost_rejects_empty_right_names() -> None:
     with pytest.raises(ValueError, match="right_names"):
-        measure_preparation_cost("overlap", ["Acme Traders"], [], [(0, 0)])
+        measure_preparation_cost(
+            "overlap",
+            ["Acme Traders"],
+            [],
+            [(0, 0)],
+            warmup_count=0,
+            repetition_count=1,
+        )
 
 
 def test_measure_preparation_cost_rejects_empty_comparison_pairs() -> None:
     with pytest.raises(ValueError, match="comparison_pairs"):
-        measure_preparation_cost("overlap", ["Acme Traders"], ["Acme Traders Ltd"], [])
+        measure_preparation_cost(
+            "overlap",
+            ["Acme Traders"],
+            ["Acme Traders Ltd"],
+            [],
+            warmup_count=0,
+            repetition_count=1,
+        )
+
+
+def test_measure_preparation_cost_rejects_a_repetition_count_below_one() -> None:
+    with pytest.raises(ValueError, match="repetition_count"):
+        measure_preparation_cost(
+            "overlap",
+            ["Acme Traders"],
+            ["Acme Traders Ltd"],
+            [(0, 0)],
+            warmup_count=0,
+            repetition_count=0,
+        )
+
+
+def test_measure_preparation_cost_rejects_a_negative_warmup_count() -> None:
+    with pytest.raises(ValueError, match="warmup_count"):
+        measure_preparation_cost(
+            "overlap",
+            ["Acme Traders"],
+            ["Acme Traders Ltd"],
+            [(0, 0)],
+            warmup_count=-1,
+            repetition_count=1,
+        )
 
 
 def test_measure_preparation_cost_refuses_to_run_when_the_artifact_is_missing(
@@ -256,6 +336,8 @@ def test_measure_preparation_cost_refuses_to_run_when_the_artifact_is_missing(
         ["Acme Traders"],
         ["Acme Traders Ltd"],
         [(0, 0)],
+        warmup_count=0,
+        repetition_count=1,
         artifact=missing,
     )
 
@@ -275,7 +357,12 @@ def test_measure_preparation_cost_reports_an_unexpected_crash_as_unavailable_not
     monkeypatch.setattr("joinless.measurement.subprocess.run", _fake_run)
 
     result = measure_preparation_cost(
-        "overlap", ["Acme Traders"], ["Acme Traders Ltd"], [(0, 0)]
+        "overlap",
+        ["Acme Traders"],
+        ["Acme Traders Ltd"],
+        [(0, 0)],
+        warmup_count=0,
+        repetition_count=1,
     )
 
     assert isinstance(result, Unavailable)
@@ -315,12 +402,14 @@ def test_preparation_costs_hoisted_phase_measures_through_resolver_prepare_hoist
 
     monkeypatch.setattr(resolver, "prepare_hoisted", _fake_prepare_hoisted)
 
-    hoisted_seconds, _naive_seconds = _preparation_costs(
+    hoisted_durations, _naive_durations = _preparation_costs(
         OverlapScorer(),
         ["Acme Traders", "Rocket Fuel Traders"],
         ["Acme Traders Ltd", "Zephyr Logistics"],
         [0, 0, 1, 1],
         [0, 1, 0, 1],
+        warmup_count=0,
+        repetition_count=1,
     )
 
     assert calls == [
@@ -329,7 +418,8 @@ def test_preparation_costs_hoisted_phase_measures_through_resolver_prepare_hoist
             ["Acme Traders Ltd", "Zephyr Logistics"],
         )
     ]
-    assert hoisted_seconds >= 0.0
+    assert len(hoisted_durations) == 1
+    assert hoisted_durations[0] >= 0.0
 
 
 def test_preparation_costs_naive_phase_measures_through_resolver_prepare_naive(
@@ -349,12 +439,14 @@ def test_preparation_costs_naive_phase_measures_through_resolver_prepare_naive(
 
     monkeypatch.setattr(resolver, "prepare_naive", _fake_prepare_naive)
 
-    _hoisted_seconds, naive_seconds = _preparation_costs(
+    _hoisted_durations, naive_durations = _preparation_costs(
         OverlapScorer(),
         ["Acme Traders", "Rocket Fuel Traders"],
         ["Acme Traders Ltd", "Zephyr Logistics"],
         [0, 0, 1, 1],
         [0, 1, 0, 1],
+        warmup_count=0,
+        repetition_count=1,
     )
 
     assert calls == [
@@ -365,7 +457,8 @@ def test_preparation_costs_naive_phase_measures_through_resolver_prepare_naive(
             ("Rocket Fuel Traders", "Zephyr Logistics"),
         ]
     ]
-    assert naive_seconds >= 0.0
+    assert len(naive_durations) == 1
+    assert naive_durations[0] >= 0.0
 
 
 class _CountingScorer:
@@ -399,9 +492,11 @@ class _CountingScorer:
 def test_preparation_costs_reproduces_the_documented_call_pattern() -> None:
     """``PreparationCost``'s own docstring: hoisted times ``prepare_all``
     called once per side; naive times ``prepare`` called fresh for both
-    records of every comparison. One extra ``prepare`` call is the shared
-    warm-up before either timed section (this module's own comment above
-    ``_PREPARATION_COST_SCRIPT``)."""
+    records of every comparison. Both are repeated ``warmup_count +
+    repetition_count`` times each (issue #103) — one full pass per call,
+    discarded for the first ``warmup_count`` and timed for the rest — so a
+    scorer sees exactly that many calls of each shape, with no separate
+    pre-warm call of its own."""
     counting = _CountingScorer(OverlapScorer())
 
     _preparation_costs(
@@ -410,10 +505,35 @@ def test_preparation_costs_reproduces_the_documented_call_pattern() -> None:
         ["Acme Traders Ltd", "Zephyr Logistics"],
         [0, 0, 1, 1],
         [0, 1, 0, 1],
+        warmup_count=1,
+        repetition_count=2,
     )
 
-    assert counting.prepare_all_calls == 2
-    assert counting.prepare_calls == 1 + 2 * 4
+    assert counting.prepare_all_calls == 2 * (1 + 2)
+    assert counting.prepare_calls == 2 * 4 * (1 + 2)
+
+
+def test_preparation_costs_discards_warmup_and_reports_one_duration_per_repetition() -> (
+    None
+):
+    """``warmup_count`` runs of each path are timed and thrown away;
+    ``repetition_count`` runs of each path are timed and kept — the same
+    discard-then-collect discipline ``measure_warm_latency`` already
+    applies to ``score`` (issue #103)."""
+    hoisted_durations, naive_durations = _preparation_costs(
+        OverlapScorer(),
+        ["Acme Traders", "Rocket Fuel Traders"],
+        ["Acme Traders Ltd", "Zephyr Logistics"],
+        [0, 0, 1, 1],
+        [0, 1, 0, 1],
+        warmup_count=3,
+        repetition_count=7,
+    )
+
+    assert len(hoisted_durations) == 7
+    assert len(naive_durations) == 7
+    assert all(duration >= 0.0 for duration in hoisted_durations)
+    assert all(duration >= 0.0 for duration in naive_durations)
 
 
 # --- measure_peak_memory(): peak RSS per arm, in its own process (issue #55) -------

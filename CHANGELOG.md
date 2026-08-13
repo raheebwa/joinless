@@ -76,3 +76,9 @@ warns nobody.
   `prepare_naive` functions — the same two `score_candidates` calls to score every
   candidate pair — instead of a second, hand-written copy of both loops. The reported
   hoist speed-ups now describe the call pattern the library actually ships.
+- Preparation cost is now measured over repeated, warmed-up samples of each path and
+  reported at the median and the 99th percentile, the same shape `measure_warm_latency`
+  already established for warm scoring, instead of a single untimed draw. A single draw
+  of this figure was noise large enough to flip which arm looked faster; the median is
+  stable across independent runs where the single draw was not, and `warmup_count`/
+  `repetition_count` now travel on the figure itself.
