@@ -22,6 +22,74 @@ import pytest
 from joinless.resolver import _REASON_NO_COORDINATES, _REASON_NOT_SELECTED
 
 
+def _install_fake_neural_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a fake ``onnxruntime``/``tokenizers`` pair in :data:`sys.modules`.
+
+    One definition for every benchmark test that needs a neural arm to load
+    without the 91 MB and 59 MB artefacts. ADR-0016 rule 2 asks a stand-in to be
+    at least as awkward as the thing it replaces, and this pair is: the session
+    returns one hidden state per token id it was given, so a caller that skipped
+    the mask, mispaired a batch, or pooled the wrong axis gets a wrong answer
+    rather than a convenient one.
+
+    The embedding it produces is the same for every name, which makes each arm's
+    predictions identical and every family's divergence exactly ``0.0``. That is
+    a deterministic property of this double, never a claim about what the real
+    graphs agree on.
+    """
+    import types
+    from collections.abc import Mapping, Sequence
+    from typing import cast
+
+    class _FakeEncoding:
+        def __init__(
+            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
+        ) -> None:
+            self.ids = ids
+            self.attention_mask = attention_mask
+            self.type_ids = type_ids
+
+    class _FakeTokenizer:
+        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
+            del pad_token, pad_id
+
+        def enable_truncation(self, *, max_length: int) -> None:
+            del max_length
+
+        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
+            return [
+                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
+            ]
+
+    class _TokenizerNamespace:
+        @staticmethod
+        def from_file(path: str) -> _FakeTokenizer:
+            del path
+            return _FakeTokenizer()
+
+    fake_tokenizers = types.ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
+
+    class _FakeSession:
+        def __init__(self, path: str, providers: list[str] | None = None) -> None:
+            del path, providers
+
+        def run(
+            self, output_names: list[str] | None, input_feed: Mapping[str, object]
+        ) -> list[object]:
+            del output_names
+            rows = cast(list[list[int]], input_feed["input_ids"])
+            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
+            return [hidden]
+
+    fake_onnxruntime = types.ModuleType("onnxruntime")
+    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
+    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+
+
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
@@ -900,61 +968,12 @@ def test_benchmark_records_both_neural_arms_models_and_their_accuracy_divergence
     real graphs' output (ADR-0016 rule 2).
     """
     import hashlib
-    import types
-    from collections.abc import Mapping, Sequence
-    from typing import cast
 
     from joinless import corpus as corpus_module
     from joinless import embedding
     from joinless.cli import main
 
-    class _FakeEncoding:
-        def __init__(
-            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
-        ) -> None:
-            self.ids = ids
-            self.attention_mask = attention_mask
-            self.type_ids = type_ids
-
-    class _FakeTokenizer:
-        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
-            del pad_token, pad_id
-
-        def enable_truncation(self, *, max_length: int) -> None:
-            del max_length
-
-        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
-            return [
-                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
-            ]
-
-    class _TokenizerNamespace:
-        @staticmethod
-        def from_file(path: str) -> _FakeTokenizer:
-            del path
-            return _FakeTokenizer()
-
-    fake_tokenizers = types.ModuleType("tokenizers")
-    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
-
-    class _FakeSession:
-        def __init__(self, path: str, providers: list[str] | None = None) -> None:
-            del path, providers
-
-        def run(
-            self, output_names: list[str] | None, input_feed: Mapping[str, object]
-        ) -> list[object]:
-            del output_names
-            rows = cast(list[list[int]], input_feed["input_ids"])
-            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
-            return [hidden]
-
-    fake_onnxruntime = types.ModuleType("onnxruntime")
-    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
-    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
-    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    _install_fake_neural_runtime(monkeypatch)
     # issue #68: the real graph's own quantized-operator census, read at run
     # time - here made to match both embedding.INT8_QUANTIZED_OPERATORS and
     # embedding.INT8_MATMUL_CONVERSION exactly (36 converted, 12 remaining), so
@@ -1062,61 +1081,12 @@ def test_benchmark_writes_no_record_when_the_int8_graph_does_not_match_its_recor
     of it.
     """
     import hashlib
-    import types
-    from collections.abc import Mapping, Sequence
-    from typing import cast
 
     from joinless import corpus as corpus_module
     from joinless import embedding
     from joinless.cli import main
 
-    class _FakeEncoding:
-        def __init__(
-            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
-        ) -> None:
-            self.ids = ids
-            self.attention_mask = attention_mask
-            self.type_ids = type_ids
-
-    class _FakeTokenizer:
-        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
-            del pad_token, pad_id
-
-        def enable_truncation(self, *, max_length: int) -> None:
-            del max_length
-
-        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
-            return [
-                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
-            ]
-
-    class _TokenizerNamespace:
-        @staticmethod
-        def from_file(path: str) -> _FakeTokenizer:
-            del path
-            return _FakeTokenizer()
-
-    fake_tokenizers = types.ModuleType("tokenizers")
-    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
-
-    class _FakeSession:
-        def __init__(self, path: str, providers: list[str] | None = None) -> None:
-            del path, providers
-
-        def run(
-            self, output_names: list[str] | None, input_feed: Mapping[str, object]
-        ) -> list[object]:
-            del output_names
-            rows = cast(list[list[int]], input_feed["input_ids"])
-            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
-            return [hidden]
-
-    fake_onnxruntime = types.ModuleType("onnxruntime")
-    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
-    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
-    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    _install_fake_neural_runtime(monkeypatch)
     # The mismatch: a graph that converted nothing at all, not
     # embedding.INT8_QUANTIZED_OPERATORS.
     monkeypatch.setitem(sys.modules, "onnx", _fake_onnx_module(["MatMul", "Add"]))
@@ -1167,61 +1137,12 @@ def test_benchmark_writes_no_record_when_the_matmul_conversion_counts_do_not_mat
     check would have let this graph through.
     """
     import hashlib
-    import types
-    from collections.abc import Mapping, Sequence
-    from typing import cast
 
     from joinless import corpus as corpus_module
     from joinless import embedding
     from joinless.cli import main
 
-    class _FakeEncoding:
-        def __init__(
-            self, ids: list[int], attention_mask: list[int], type_ids: list[int]
-        ) -> None:
-            self.ids = ids
-            self.attention_mask = attention_mask
-            self.type_ids = type_ids
-
-    class _FakeTokenizer:
-        def enable_padding(self, *, pad_token: str, pad_id: int) -> None:
-            del pad_token, pad_id
-
-        def enable_truncation(self, *, max_length: int) -> None:
-            del max_length
-
-        def encode_batch(self, texts: Sequence[str]) -> list[_FakeEncoding]:
-            return [
-                _FakeEncoding(ids=[1], attention_mask=[1], type_ids=[0]) for _ in texts
-            ]
-
-    class _TokenizerNamespace:
-        @staticmethod
-        def from_file(path: str) -> _FakeTokenizer:
-            del path
-            return _FakeTokenizer()
-
-    fake_tokenizers = types.ModuleType("tokenizers")
-    fake_tokenizers.Tokenizer = _TokenizerNamespace  # type: ignore[attr-defined]
-
-    class _FakeSession:
-        def __init__(self, path: str, providers: list[str] | None = None) -> None:
-            del path, providers
-
-        def run(
-            self, output_names: list[str] | None, input_feed: Mapping[str, object]
-        ) -> list[object]:
-            del output_names
-            rows = cast(list[list[int]], input_feed["input_ids"])
-            hidden = [[[1.0, 0.0] for _ in row] for row in rows]
-            return [hidden]
-
-    fake_onnxruntime = types.ModuleType("onnxruntime")
-    fake_onnxruntime.InferenceSession = _FakeSession  # type: ignore[attr-defined]
-    fake_onnxruntime.__version__ = "9.9.9-fake"  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "onnxruntime", fake_onnxruntime)
-    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    _install_fake_neural_runtime(monkeypatch)
     # The mismatch: types present are exactly right, but only 30 MatMulInteger
     # nodes exist where the pinned census records 36.
     monkeypatch.setitem(
