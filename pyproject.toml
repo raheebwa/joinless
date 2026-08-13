@@ -30,9 +30,6 @@ dev = [
     # makes that statement true rather than aspirational.
     "hypothesis>=6.140",
 ]
-# `tokenizers` is the standalone Rust tokenizer, not `transformers`. An ONNX graph
-# takes token ids, so an inference-only install still needs something to produce
-# them, and this is the smallest thing that does (ADR-0017).
 # `tokenizers` is the standalone Rust tokenizer, not `transformers`: an ONNX graph
 # takes token ids, so an inference-only install still needs something to produce
 # them, and this is the smallest thing that does (ADR-0017). It depends on
