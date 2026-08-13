@@ -712,7 +712,7 @@ def test_benchmark_writes_one_record_carrying_its_schema_and_exact_command(
 ) -> None:
     record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
 
-    assert record["schema"] == "benchmark-v3"
+    assert record["schema"] == "benchmark-v5"
     assert record["command"] == ["joinless", "benchmark"]
 
 
@@ -786,6 +786,136 @@ def test_benchmark_records_a_real_measured_result_for_a_registered_arm(
     assert cold_start["session_creation"]["value"] is None
 
 
+def test_benchmark_records_both_preparation_paths_and_they_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #65's third bullet: "the run record states which one produced
+    each figure" - each registered arm's ``preparation`` entry carries both
+    the hoisted and the naive path's own score, each self-tagged
+    (``ScoredComparisons.path``), and the two agree exactly - the same
+    invariant ``tests/test_resolver.py`` already asserts at the resolver
+    level, now exercised through the real command rather than mocked."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    for arm in ("overlap", "fuzzy"):
+        preparation = record["results"][arm]["preparation"]
+        assert preparation["status"] == "ok"
+        assert preparation["hoisted"]["path"] == "hoisted"
+        assert preparation["naive"]["path"] == "naive"
+        assert preparation["hoisted"]["scores"] == preparation["naive"]["scores"]
+        assert preparation["hoisted"]["scores"]
+
+
+def test_benchmark_records_preparation_as_unavailable_for_an_unregistered_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither the accuracy pipeline nor either preparation path ever runs
+    for an arm whose dependency is missing (ADR-0013) - ``preparation`` is
+    unavailable for the same reason its siblings are, not silently absent."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    for arm in ("embed-fp32", "embed-int8"):
+        preparation = record["results"][arm]["preparation"]
+        assert preparation["status"] == "unavailable"
+        assert arm in preparation["reason"]
+
+
+# --- preparation cost and bucket occupancy (issue #66) ------------------------
+
+
+def test_benchmark_records_the_bucket_occupancy_the_preparation_sample_actually_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66's second bullet: "the bucket occupancy distribution for the
+    run is recorded in the same record" - a real distribution (not a mean),
+    read from the resolver's own grid blocking over the run's shared
+    preparation sample, not a configured parameter echoed back.
+
+    Finding 1: it lives nested under ``preparation_asymmetry``, not as a
+    bare top-level field a reader could mistake for describing the accuracy
+    evaluation's own 470-pair corpus rather than this one 20-record sample -
+    and it carries its own ``max_occupancy`` rather than requiring a reader
+    to reduce ``counts`` themselves."""
+    from joinless.resolver import DEFAULT_CELL_SIZE_DEGREES
+
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    assert "bucket_occupancy" not in record
+    occupancy = record["preparation_asymmetry"]["occupancy"]
+    assert sorted(occupancy["counts"]) == [1, 2, 3, 4]
+    assert occupancy["cell_size_degrees"] == DEFAULT_CELL_SIZE_DEGREES
+    assert occupancy["max_occupancy"] == 4
+
+
+def test_benchmark_records_preparation_cost_for_a_registered_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66's first bullet: "hoisted and naive preparation cost are
+    recorded per arm" - measured in an isolated worker (RFC-0002 Method
+    step 7), over the exact candidate set whose occupancy this run also
+    reports (ADR-0009)."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    for arm in ("overlap", "fuzzy"):
+        cost = record["results"][arm]["preparation_cost"]
+        assert cost["status"] == "ok"
+        assert cost["arm"] == arm
+        assert cost["hoisted_seconds"] >= 0.0
+        assert cost["naive_seconds"] >= 0.0
+        assert cost["record_count"] == 20
+        assert cost["comparison_count"] == 30
+
+
+def test_benchmark_records_preparation_cost_as_unavailable_for_an_unregistered_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    for arm in ("embed-fp32", "embed-int8"):
+        cost = record["results"][arm]["preparation_cost"]
+        assert cost["status"] == "unavailable"
+        assert arm in cost["reason"]
+
+
+def test_benchmark_records_the_classical_arm_preparation_speedup_and_no_neural_speedup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #66's third bullet: "the asymmetry between classical and
+    neural arms is reported as a result" - derivable from the record alone.
+    Neither neural arm has a configured artefact in this fixture, so
+    ``neural_speedups`` is empty rather than populated with a fabricated
+    figure (ADR-0013)."""
+    record = _run_benchmark_with_small_corpus(tmp_path, monkeypatch)
+
+    asymmetry = record["preparation_asymmetry"]
+    assert set(asymmetry["classical_speedups"]) == {"overlap", "fuzzy"}
+    assert asymmetry["neural_speedups"] == {}
+    for metric in asymmetry["classical_speedups"].values():
+        assert (metric["value"] is None) != (metric["undefined_reason"] is None)
+
+
+def test_benchmark_prints_the_preparation_asymmetry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless import corpus as corpus_module
+    from joinless.cli import main
+
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["benchmark"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "preparation hoist speed-up" in out
+    assert "overlap" in out
+    assert "fuzzy" in out
+    # Finding 1: a reader of the printed output, not only of the JSON
+    # record, can see the occupancy the speed-ups were measured at.
+    assert "candidate-bucket occupancy" in out
+    assert "max 4" in out
+
+
 def test_benchmark_records_the_classical_arms_artifact_size_as_an_explicit_fact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -830,6 +960,10 @@ def test_benchmark_records_the_environment_the_readme_requires(
     assert environment["warmup_count"] == 5
     assert environment["repetition_count"] == 20
     assert environment["power_mode"] in {"ac", "battery", "unknown"}
+    # Finding 2: states which path produced every arm's `accuracy` and
+    # `warm_latency` - the two figures a reader actually compares arms on
+    # that previously carried no such attribution.
+    assert environment["measurement_preparation_path"] == "hoisted"
 
 
 def test_benchmark_records_model_identity_and_runtime_version_when_the_neural_arm_runs(
@@ -1341,8 +1475,8 @@ from joinless.evaluation import (
     InvalidRun,
     Metric,
 )
-from joinless.measurement import Unavailable
-from joinless.runrecord import ArmResult
+from joinless.measurement import PreparationCost, Unavailable
+from joinless.runrecord import ArmResult, BucketOccupancy
 
 
 def _report_with_f1(f1_value: float) -> EvaluationReport:
@@ -1376,6 +1510,8 @@ def _result_with_accuracy(
         peak_memory=unavailable,
         cold_start=unavailable,
         artifact_size=unavailable,
+        preparation=unavailable,
+        preparation_cost=unavailable,
     )
 
 
@@ -1503,6 +1639,230 @@ def test_int8_accuracy_divergence_is_absent_with_a_reason_when_neither_arm_ran()
 
     assert divergence.value is None
     assert divergence.reason is not None
+
+
+# --- preparation cost & bucket occupancy helpers (issue #66) -----------------------
+
+
+def _cost(arm: str, *, hoisted_seconds: float, naive_seconds: float) -> PreparationCost:
+    return PreparationCost(
+        arm=arm,
+        hoisted_seconds=hoisted_seconds,
+        naive_seconds=naive_seconds,
+        record_count=20,
+        comparison_count=30,
+    )
+
+
+def _occupancy() -> BucketOccupancy:
+    return BucketOccupancy(counts=(1, 2, 3, 4), cell_size_degrees=0.01, max_occupancy=4)
+
+
+def test_build_preparation_sample_produces_the_configured_occupancy_distribution() -> (
+    None
+):
+    """The sample's occupancy is a real, uneven distribution - not one
+    repeated value - so the run's own ``bucket_occupancy`` figure is a
+    genuine distribution to report (issue #66's second bullet)."""
+    from joinless import corpus as corpus_module
+    from joinless.cli import _build_preparation_sample, _pool_corpora
+
+    pooled = _pool_corpora(corpus_module.generate_corpora((1,)))
+
+    sample = _build_preparation_sample(pooled)
+
+    assert len(sample.left_names) == 20 // 2
+    assert len(sample.right_names) == 20 // 2
+    assert sorted(sample.occupancy.counts) == [1, 2, 3, 4]
+    assert sample.occupancy.max_occupancy == 4
+    assert len(sample.comparison_pairs) == 30
+
+
+def test_build_preparation_sample_rejects_a_corpus_too_small_to_draw_from() -> None:
+    from joinless.cli import _build_preparation_sample
+    from joinless.corpus import Corpus, LabelledPair
+
+    tiny = Corpus(
+        seed=1,
+        pairs=(
+            LabelledPair(
+                left_name="A", right_name="B", label=1, pair_id="0001-exact-000"
+            ),
+        ),
+        roles={"0001-exact-000": "development"},
+    )
+
+    with pytest.raises(ValueError, match="fewer pairs"):
+        _build_preparation_sample(tiny)
+
+
+def test_hoist_speedup_is_the_naive_over_hoisted_ratio() -> None:
+    from joinless.cli import _hoist_speedup
+
+    metric = _hoist_speedup(
+        _cost("embed-fp32", hoisted_seconds=0.01, naive_seconds=0.5)
+    )
+
+    assert metric.value == 50.0
+    assert metric.undefined_reason is None
+
+
+def test_hoist_speedup_is_undefined_when_hoisted_measured_at_zero_seconds() -> None:
+    from joinless.cli import _hoist_speedup
+
+    metric = _hoist_speedup(_cost("overlap", hoisted_seconds=0.0, naive_seconds=0.0))
+
+    assert metric.value is None
+    assert metric.undefined_reason is not None
+
+
+def test_preparation_asymmetry_partitions_classical_and_neural_arms() -> None:
+    import dataclasses
+
+    from joinless.cli import _preparation_asymmetry
+
+    arm_results = {
+        "overlap": dataclasses.replace(
+            _result_with_accuracy("overlap", _report_with_f1(1.0)),
+            preparation_cost=_cost("overlap", hoisted_seconds=0.01, naive_seconds=0.02),
+        ),
+        "embed-fp32": dataclasses.replace(
+            _result_with_accuracy("embed-fp32", _report_with_f1(1.0)),
+            preparation_cost=_cost(
+                "embed-fp32", hoisted_seconds=0.01, naive_seconds=1.0
+            ),
+        ),
+    }
+
+    asymmetry = _preparation_asymmetry(arm_results, _occupancy())
+
+    assert set(asymmetry.classical_speedups) == {"overlap"}
+    assert set(asymmetry.neural_speedups) == {"embed-fp32"}
+    assert asymmetry.neural_speedups["embed-fp32"].value == 100.0
+    assert asymmetry.occupancy == _occupancy()
+
+
+def test_preparation_asymmetry_skips_an_arm_whose_cost_is_unavailable() -> None:
+    from joinless.cli import _preparation_asymmetry
+
+    arm_results = {
+        "overlap": _result_with_accuracy("overlap", _report_with_f1(1.0)),
+    }
+
+    asymmetry = _preparation_asymmetry(arm_results, _occupancy())
+
+    assert asymmetry.classical_speedups == {}
+    assert asymmetry.neural_speedups == {}
+
+
+def test_preparation_asymmetry_ignores_an_arm_outside_both_named_families() -> None:
+    """A defensive branch this project's own four registered arms never
+    reach in practice (every name in ``_ARMS`` is one or the other) - kept
+    testable directly rather than asserted only by omission."""
+    import dataclasses
+
+    from joinless.cli import _preparation_asymmetry
+
+    result = dataclasses.replace(
+        _result_with_accuracy("mystery-arm", _report_with_f1(1.0)),
+        preparation_cost=_cost("mystery-arm", hoisted_seconds=0.01, naive_seconds=0.02),
+    )
+
+    asymmetry = _preparation_asymmetry({"mystery-arm": result}, _occupancy())
+
+    assert asymmetry.classical_speedups == {}
+    assert asymmetry.neural_speedups == {}
+
+
+def test_format_preparation_asymmetry_reports_no_arm_when_both_groups_are_empty() -> (
+    None
+):
+    from joinless.cli import _format_preparation_asymmetry
+    from joinless.runrecord import PreparationAsymmetry
+
+    lines = _format_preparation_asymmetry(
+        PreparationAsymmetry(
+            occupancy=_occupancy(), classical_speedups={}, neural_speedups={}
+        )
+    )
+
+    assert lines[0] == "preparation hoist speed-up (naive seconds / hoisted seconds):"
+    assert any("candidate-bucket occupancy" in line for line in lines)
+    assert any("classical: no arm" in line for line in lines)
+    assert any("neural: no arm" in line for line in lines)
+
+
+def test_format_preparation_asymmetry_names_each_arms_speed_up_factor() -> None:
+    from joinless.cli import _format_preparation_asymmetry
+    from joinless.runrecord import PreparationAsymmetry
+
+    lines = _format_preparation_asymmetry(
+        PreparationAsymmetry(
+            occupancy=_occupancy(),
+            classical_speedups={"overlap": Metric(value=1.02, undefined_reason=None)},
+            neural_speedups={"embed-fp32": Metric(value=48.6, undefined_reason=None)},
+        )
+    )
+
+    assert any("overlap" in line and "1.02x" in line for line in lines)
+    assert any("embed-fp32" in line and "48.60x" in line for line in lines)
+
+
+def test_format_preparation_asymmetry_reports_undefined_when_the_ratio_has_none() -> (
+    None
+):
+    from joinless.cli import _format_preparation_asymmetry
+    from joinless.runrecord import PreparationAsymmetry
+
+    lines = _format_preparation_asymmetry(
+        PreparationAsymmetry(
+            occupancy=_occupancy(),
+            classical_speedups={
+                "overlap": Metric(
+                    value=None, undefined_reason="hoisted preparation measured at 0"
+                )
+            },
+            neural_speedups={},
+        )
+    )
+
+    assert any("overlap" in line and "undefined" in line for line in lines)
+
+
+def test_benchmark_persists_the_same_preparation_asymmetry_it_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from joinless import cli as cli_module
+    from joinless import corpus as corpus_module
+    from joinless.runrecord import PreparationAsymmetry
+
+    monkeypatch.setattr(corpus_module, "SEEDS", (1,))
+    monkeypatch.chdir(tmp_path)
+    forced = PreparationAsymmetry(
+        occupancy=_occupancy(),
+        classical_speedups={"overlap": Metric(value=2.0, undefined_reason=None)},
+        neural_speedups={},
+    )
+    monkeypatch.setattr(cli_module, "_preparation_asymmetry", lambda *a, **k: forced)
+
+    exit_code = cli_module.main(["benchmark"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "overlap" in out
+    assert "2.00x" in out
+
+    written = list((tmp_path / "benchmarks").glob("*.json"))
+    record = json.loads(written[0].read_text(encoding="utf-8"))
+    assert record["preparation_asymmetry"] == {
+        "occupancy": {
+            "counts": [1, 2, 3, 4],
+            "cell_size_degrees": 0.01,
+            "max_occupancy": 4,
+        },
+        "classical_speedups": {"overlap": {"value": 2.0, "undefined_reason": None}},
+        "neural_speedups": {},
+    }
 
 
 # --- quantized-operator census: read live from the int8 graph, keyed by candidate

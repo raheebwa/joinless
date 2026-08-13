@@ -15,6 +15,11 @@ Every record carries:
 - The exact command that produced it
 - Per-arm results, per perturbation family
 - The int8 arm's per-family accuracy divergence from the fp32 arm, where both ran
+- Each arm's hoisted and naive preparation cost, measured over the run's own shared
+  candidate set
+- The candidate-bucket occupancy distribution that set produced, and the grid cell size
+  it was measured under
+- The classical/neural preparation hoist speed-up, partitioned by arm family
 
 **Every number published in the README traces to a record here.** A figure that cannot be
 traced to a run in this directory does not belong in the README.

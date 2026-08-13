@@ -46,7 +46,14 @@ from joinless.evaluation import (
     Metric,
     SelectedThreshold,
 )
-from joinless.measurement import ColdStartPhases, PeakMemory, Unavailable, WarmLatency
+from joinless.measurement import (
+    ColdStartPhases,
+    PeakMemory,
+    PreparationCost,
+    Unavailable,
+    WarmLatency,
+)
+from joinless.resolver import PreparationPath, ScoredComparisons
 
 _T = TypeVar("_T")
 
@@ -182,6 +189,41 @@ class Environment:
     and only the counts tell a reader which. Wrapped in :class:`Maybe`, not a
     bare mapping — a run with no int8 arm has no graph to read a census from
     (ADR-0013).
+
+    ``measurement_preparation_path`` states which of
+    :data:`~joinless.resolver.PreparationPath`'s two call patterns produced
+    every arm's ``results.<arm>.accuracy`` and ``results.<arm>.warm_latency``
+    in this run (Finding 2; issue #65's third bullet: "the run record states
+    which one produced each figure") — always ``"hoisted"``:
+    :func:`joinless.evaluation.evaluate_sealed_test` prepares every pair's
+    names in one ``prepare_all`` batch ahead of scoring (that module's own
+    docstring), and this project's warm-latency worker prepares each side
+    once before its repeated ``score`` calls; neither has a naive
+    counterpart a run could select instead, so the value is a structural
+    fact about those two call sites, identical for every arm in every run,
+    not a per-arm choice.
+
+    One field here rather than a new field added to
+    :class:`~joinless.evaluation.EvaluationReport` and
+    :class:`~joinless.measurement.WarmLatency` themselves: both types are
+    pure figures owned by modules that know nothing about preparation paths
+    at all (:mod:`joinless.evaluation`'s own docstring: "nothing reads a
+    file, spawns a process..."), and a value that never varies does not
+    earn a new field on every construction site of two types this project
+    already reuses across many unrelated tests (YAGNI) — recording it once,
+    here, where every other run-wide measurement-methodology fact
+    (``warmup_count``, ``repetition_count``, ``thread_count``) already
+    lives, says the same thing without it.
+
+    ``peak_memory``, ``cold_start`` and ``artifact_size`` are not covered
+    by this field: each measures exactly one comparison with nothing to
+    hoist across, so "hoisted" and "naive" collapse to the same operation
+    for them and a path label would state a fact that is always trivially
+    true. ``preparation`` and ``preparation_cost`` are not covered either —
+    both already exercise, and self-tag, both paths in every run
+    (:class:`PreparationComparison`, :class:`~joinless.measurement.PreparationCost`),
+    so a third label naming which one produced them would have nothing to
+    disambiguate.
     """
 
     hardware: Hardware
@@ -192,6 +234,7 @@ class Environment:
     repetition_count: int
     models: Mapping[str, ModelIdentity]
     quantized_operators: Maybe[Mapping[str, MatmulConversion]]
+    measurement_preparation_path: PreparationPath
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +253,109 @@ class EvaluationSetIdentity:
 
     seeds: tuple[int, ...]
     case_mixture: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationComparison:
+    """This run's naive and hoisted preparation paths, run over the same
+    illustrative comparison and each self-tagged with the path that
+    produced it (issue #65's third bullet: "the run record states which
+    one produced each figure").
+
+    Holding one :class:`~joinless.resolver.ScoredComparisons` per path —
+    rather than a bare pair of floats — is what makes that attribution
+    structural: :attr:`~joinless.resolver.ScoredComparisons.path` travels
+    on the value itself (that type's own docstring), so a reader holding
+    ``comparison.hoisted`` never has to trust this field's name, or its
+    position in this dataclass, to know which call pattern produced it.
+
+    Cost is deliberately absent here — issue #66's job, not this type's.
+    Both paths are exercised in a real run to prove they agree on this
+    run's own data (ADR-0009 consequence 2: the naive path is a control,
+    not a stub), never to time either one.
+    """
+
+    hoisted: ScoredComparisons
+    naive: ScoredComparisons
+
+
+@dataclass(frozen=True, slots=True)
+class BucketOccupancy:
+    """The candidate-bucket occupancy distribution for the record set this
+    run's preparation-cost measurement drew comparisons from (issue #66) —
+    the independent variable the hoist's win is a function of, ADR-0009
+    says, not context to mention alongside it.
+
+    ``counts`` is one entry per occupied grid cell on the candidate side —
+    the raw distribution, not reduced to a mean: issue #66 asks for "a
+    distribution, not a mean", and a mean here would already be the wrong
+    summary before a reader even sees it, since ADR-0009's claim is about
+    the *shape* of occupancy, not its average. A reader who wants a mean,
+    median or histogram computes it from this tuple; nothing this module
+    could compute instead would be more informative than the counts
+    themselves. There is exactly one ``BucketOccupancy`` per run, not one
+    per arm — occupancy is a property of the candidate set every arm's
+    preparation cost is measured over, not of any one arm's scorer.
+
+    ``cell_size_degrees`` is the grid cell width the distribution was
+    measured under (:data:`joinless.resolver.DEFAULT_CELL_SIZE_DEGREES`
+    unless a caller overrides it) — the counts mean nothing without knowing
+    how wide a cell is.
+
+    ``max_occupancy`` is redundant with ``max(counts)`` — kept anyway, the
+    same "computed once, named directly" precedent :class:`MatmulConversion`'s
+    own ``fp32_count`` already sets for a value a reader would otherwise have
+    to recompute: ADR-0009's claim is specifically that the hoist's win grows
+    with how full the fullest bucket gets, so the one number that claim is
+    about should not require reducing a tuple to find (Finding 1).
+    """
+
+    counts: tuple[int, ...]
+    cell_size_degrees: float
+    max_occupancy: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationAsymmetry:
+    """The classical/neural asymmetry ADR-0009 names as itself part of the
+    finding (issue #66's third bullet: "the asymmetry between classical and
+    neural arms is reported as a result, not as an aside") — each arm's
+    hoist speed-up (naive preparation seconds divided by hoisted), grouped
+    by arm family so a reader sees the two groups directly rather than
+    first having to know which of the four registered arms are classical
+    and which are neural before partitioning four numbers by hand.
+
+    Keyed by arm name within each group, mapping to a
+    :class:`~joinless.evaluation.Metric` rather than a bare ``float``: a
+    hoisted preparation timed at ``0.0`` seconds — a real possibility for
+    the cheapest classical arms on a coarse clock — would make the ratio
+    undefined, not infinite, the same "undefined is not zero" rule
+    ADR-0013 states everywhere else this module reports a figure. An arm
+    that never produced a comparable :class:`~joinless.measurement.PreparationCost`
+    in this run is absent from both mappings entirely, mirroring how
+    :func:`~joinless.evaluation.find_contradictions` only ever compares
+    arms with a real report to compare.
+
+    ``occupancy`` is the candidate-bucket occupancy distribution the run's
+    shared preparation-cost sample was drawn from (:class:`BucketOccupancy`,
+    issue #66) — carried here, on the finding it explains, rather than as an
+    unrelated top-level field on :class:`RunRecord` beside ``evaluation_set``
+    (Finding 1). This run's accuracy evaluation performs no grid blocking at
+    all — it scores each of ``evaluation_set``'s labelled pairs directly — so
+    an occupancy sitting next to ``evaluation_set`` invited exactly the
+    misreading ADR-0009 exists to prevent: that the accuracy figures came
+    from a run whose candidate buckets held 1 to 4 records, when in truth
+    this occupancy describes only the one small sample every arm's own
+    :class:`~joinless.measurement.PreparationCost` was measured over.
+    Nesting it inside the speed-up comparison it explains is what makes that
+    scope structural rather than a fact a reader has to already know —
+    ADR-0009's own words: "a hoist speed-up quoted without the occupancy
+    that produced it cannot be transferred to any other dataset."
+    """
+
+    occupancy: BucketOccupancy
+    classical_speedups: Mapping[str, Metric]
+    neural_speedups: Mapping[str, Metric]
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +379,25 @@ class ArmResult:
     initialise and their ``Metric`` is defined-undefined (a real "no
     artefact" fact); an arm whose ``get_scorer`` call itself failed never
     reaches that question at all.
+
+    ``preparation`` is a fifth figure, alongside the four RFC-0002 names —
+    this arm's naive and hoisted preparation paths, run over the same
+    candidate pair and each self-tagged with the path that produced it
+    (issue #65's third bullet, :class:`PreparationComparison`). Required,
+    with no default, for the same reason ``resolver.score_candidates``'s
+    own ``preparation`` argument has none: neither path is this run's
+    default by accident. ``Unavailable`` for the same "never got far
+    enough to be asked" arms as its siblings.
+
+    ``preparation_cost`` is a sixth figure, alongside ``preparation`` —
+    this arm's own hoisted and naive preparation *cost*, timed in an
+    isolated worker over the run's shared occupancy sample (issue #66,
+    :class:`~joinless.measurement.PreparationCost`), as distinct from
+    ``preparation``'s equality proof: that field asks "do the two paths
+    agree on this run's data", never timed; this one asks "what does each
+    path cost", never scored. Both exist on every arm because they answer
+    different questions issue #65 and issue #66 each ask, not because one
+    supersedes the other.
     """
 
     accuracy: EvaluationReport | InvalidRun
@@ -240,6 +405,8 @@ class ArmResult:
     peak_memory: PeakMemory | Unavailable
     cold_start: ColdStartPhases | Unavailable
     artifact_size: Metric | Unavailable
+    preparation: PreparationComparison | Unavailable
+    preparation_cost: PreparationCost | Unavailable
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +441,19 @@ class RunRecord:
     report" rather than "not computed at all". Also a required argument to
     :meth:`RunAssembly.build`, for the same reason ``contradictions`` is: a
     caller cannot build a record without stating what it found.
+
+    ``preparation_asymmetry`` is the classical/neural hoist speed-up
+    comparison issue #66's third bullet asks to be "reported as a result,
+    not as an aside" (:class:`PreparationAsymmetry`) — computed once by the
+    caller from every arm's own :class:`~joinless.measurement.PreparationCost`
+    and handed to :meth:`RunAssembly.build`, the same discipline
+    ``contradictions`` and ``int8_accuracy_divergence`` already follow:
+    computed once, persisted, never recomputed at render time. It also
+    carries the run's :class:`BucketOccupancy` (Finding 1) — there is no
+    separate ``bucket_occupancy`` field on this type for the same reason
+    there is no separate one on :class:`PreparationAsymmetry` itself: see
+    that type's own docstring for why occupancy belongs to the finding it
+    explains rather than to this type directly.
     """
 
     schema: str
@@ -287,6 +467,7 @@ class RunRecord:
     results: Mapping[str, ArmResult]
     contradictions: tuple[Contradiction, ...]
     int8_accuracy_divergence: Maybe[tuple[AccuracyDivergence, ...]]
+    preparation_asymmetry: PreparationAsymmetry
 
 
 def build_evaluation_set_identity(
@@ -377,6 +558,7 @@ class RunAssembly:
         selected_thresholds: Sequence[SelectedThreshold],
         contradictions: Sequence[Contradiction],
         int8_accuracy_divergence: Maybe[tuple[AccuracyDivergence, ...]],
+        preparation_asymmetry: PreparationAsymmetry,
     ) -> RunRecord:
         """Freeze everything added so far into a :class:`RunRecord`.
 
@@ -391,7 +573,10 @@ class RunAssembly:
         :func:`joinless.evaluation.compute_accuracy_divergence` found, which
         is what makes "the comparison ran, whatever it found" a fact about
         every ``RunRecord`` rather than a step a caller could forget (see
-        :class:`RunRecord`'s own docstring).
+        :class:`RunRecord`'s own docstring). ``preparation_asymmetry`` has
+        no default for the same reason (issue #66) — and it is the only
+        place :class:`BucketOccupancy` enters a record at all (Finding 1),
+        so there is no second, separate occupancy argument here either.
         """
         if not self._results:
             raise ValueError("run record requires at least one arm's result")
@@ -407,6 +592,7 @@ class RunAssembly:
             results=MappingProxyType(dict(self._results)),
             contradictions=tuple(contradictions),
             int8_accuracy_divergence=int8_accuracy_divergence,
+            preparation_asymmetry=preparation_asymmetry,
         )
 
 
@@ -423,6 +609,8 @@ _OK_TAGGED_TYPES: tuple[type, ...] = (
     WarmLatency,
     PeakMemory,
     ColdStartPhases,
+    PreparationComparison,
+    PreparationCost,
 )
 
 

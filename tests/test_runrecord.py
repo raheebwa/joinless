@@ -17,10 +17,12 @@ from joinless.evaluation import (
 )
 from joinless.runrecord import (
     ArmResult,
+    BucketOccupancy,
     Environment,
     EvaluationSetIdentity,
     Hardware,
     Maybe,
+    PreparationAsymmetry,
     RunAssembly,
     RunRecord,
     RuntimeVersions,
@@ -49,11 +51,22 @@ def _environment() -> Environment:
         repetition_count=20,
         models={},
         quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+        measurement_preparation_path="hoisted",
     )
 
 
 def _evaluation_set() -> EvaluationSetIdentity:
     return EvaluationSetIdentity(seeds=(1,), case_mixture={"exact": 30})
+
+
+def _bucket_occupancy() -> BucketOccupancy:
+    return BucketOccupancy(counts=(1, 2, 3), cell_size_degrees=0.01, max_occupancy=3)
+
+
+def _preparation_asymmetry() -> PreparationAsymmetry:
+    return PreparationAsymmetry(
+        occupancy=_bucket_occupancy(), classical_speedups={}, neural_speedups={}
+    )
 
 
 def _ok_report() -> EvaluationReport:
@@ -130,6 +143,91 @@ def test_matmul_conversion_carries_converted_fp32_and_remaining_counts() -> None
     assert conversion.int8_count_remaining == 12
 
 
+def test_preparation_comparison_carries_both_paths_own_scored_comparisons() -> None:
+    """Issue #65's third bullet: "the run record states which one produced
+    each figure" - satisfied structurally by holding one
+    :class:`~joinless.resolver.ScoredComparisons` per path, each already
+    self-tagged with the path that produced it (that type's own docstring),
+    rather than a bare pair of numbers a reader would have to trust a
+    variable name or field position to tell apart."""
+    from joinless.resolver import ScoredComparisons
+    from joinless.runrecord import PreparationComparison
+
+    comparison = PreparationComparison(
+        hoisted=ScoredComparisons(path="hoisted", scores=(0.5,)),
+        naive=ScoredComparisons(path="naive", scores=(0.5,)),
+    )
+
+    assert comparison.hoisted.path == "hoisted"
+    assert comparison.hoisted.scores == (0.5,)
+    assert comparison.naive.path == "naive"
+    assert comparison.naive.scores == (0.5,)
+
+
+def test_bucket_occupancy_carries_the_full_distribution_and_the_cell_size_it_was_measured_under() -> (
+    None
+):
+    """Issue #66: "occupancy is not context - it is the independent
+    variable" - the raw per-cell counts, not a mean, so a reader can compute
+    whatever summary they need rather than trust one this module chose for
+    them (ADR-0009: bucket density has to travel with the hoist's result)."""
+    occupancy = BucketOccupancy(
+        counts=(1, 2, 4), cell_size_degrees=0.01, max_occupancy=4
+    )
+
+    assert occupancy.counts == (1, 2, 4)
+    assert occupancy.cell_size_degrees == 0.01
+    assert occupancy.max_occupancy == 4
+
+
+def test_bucket_occupancy_carries_its_max_occupancy_directly() -> None:
+    """Finding 1: a reader must be able to see how full the fullest bucket
+    got without reducing ``counts`` themselves - the same "computed once,
+    named directly" precedent :class:`MatmulConversion`'s own ``fp32_count``
+    already sets for a value that is redundant with its siblings but kept
+    anyway so a reader never has to recompute it."""
+    occupancy = BucketOccupancy(
+        counts=(1, 2, 3, 4), cell_size_degrees=0.01, max_occupancy=4
+    )
+
+    assert occupancy.max_occupancy == max(occupancy.counts)
+
+
+def test_preparation_asymmetry_partitions_speed_up_by_arm_class() -> None:
+    """Issue #66's third bullet: "the asymmetry between classical and
+    neural arms is reported as a result" - a reader partitions the two
+    groups from this type alone, without first knowing which of the four
+    registered arms are classical and which are neural."""
+    fast = Metric(value=1.02, undefined_reason=None)
+    slow = Metric(value=48.6, undefined_reason=None)
+    occupancy = BucketOccupancy(counts=(1, 2), cell_size_degrees=0.01, max_occupancy=2)
+    asymmetry = PreparationAsymmetry(
+        occupancy=occupancy,
+        classical_speedups={"overlap": fast},
+        neural_speedups={"embed-fp32": slow},
+    )
+
+    assert asymmetry.classical_speedups == {"overlap": fast}
+    assert asymmetry.neural_speedups == {"embed-fp32": slow}
+
+
+def test_preparation_asymmetry_carries_the_occupancy_it_explains() -> None:
+    """Finding 1: occupancy is the independent variable the asymmetry is a
+    function of (ADR-0009), so it travels on the finding it explains rather
+    than sitting as an unrelated top-level field beside ``evaluation_set`` -
+    where nothing marks it as describing only the preparation-cost sample,
+    not the accuracy evaluation."""
+    occupancy = BucketOccupancy(
+        counts=(1, 2, 3, 4), cell_size_degrees=0.01, max_occupancy=4
+    )
+
+    asymmetry = PreparationAsymmetry(
+        occupancy=occupancy, classical_speedups={}, neural_speedups={}
+    )
+
+    assert asymmetry.occupancy is occupancy
+
+
 # --- RunAssembly: expectations before any report (ADR-0011 rule 4, issue #50) -------
 
 from joinless.measurement import Unavailable
@@ -148,6 +246,8 @@ def _arm_result() -> ArmResult:
         artifact_size=Metric(
             value=None, undefined_reason="classical arms carry no model artifact"
         ),
+        preparation=_unavailable("overlap"),
+        preparation_cost=_unavailable("overlap"),
     )
 
 
@@ -169,6 +269,7 @@ def test_build_rejects_a_run_with_no_arm_added() -> None:
             evaluation_set=_evaluation_set(),
             selected_thresholds=(),
             contradictions=(),
+            preparation_asymmetry=_preparation_asymmetry(),
             int8_accuracy_divergence=Maybe(
                 value=None, reason="not computed in this test"
             ),
@@ -188,6 +289,7 @@ def test_a_built_record_carries_the_expected_winners_given_at_construction() -> 
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -219,6 +321,7 @@ def test_a_built_record_carries_the_contradictions_it_was_given() -> None:
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(contradiction,),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -240,6 +343,7 @@ def test_a_run_with_no_broken_expectation_records_an_empty_contradictions_tuple(
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -263,6 +367,7 @@ def _record_with(arm_result: ArmResult) -> RunRecord:
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -304,6 +409,27 @@ def test_environment_models_is_empty_when_no_neural_arm_ran() -> None:
     assert _environment().models == {}
 
 
+# --- Environment.measurement_preparation_path: which path produced
+# `results.<arm>.accuracy` and `results.<arm>.warm_latency` (Finding 2) -------------
+
+
+def test_environment_states_the_path_that_produced_accuracy_and_warm_latency() -> None:
+    """Finding 2: neither ``results.<arm>.accuracy`` nor
+    ``results.<arm>.warm_latency`` states which preparation path produced
+    it - only ``PreparationComparison``'s own ``path`` did, which describes
+    itself and nothing else. This field is the run record stating it for
+    the two figures that don't (issue #65's third bullet)."""
+    assert _environment().measurement_preparation_path == "hoisted"
+
+
+def test_record_to_dict_renders_the_measurement_preparation_path() -> None:
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    assert payload["environment"]["measurement_preparation_path"] == "hoisted"
+
+
 def test_record_to_dict_renders_one_model_identity_by_arm_name_when_one_neural_arm_ran() -> (
     None
 ):
@@ -324,6 +450,7 @@ def test_record_to_dict_renders_one_model_identity_by_arm_name_when_one_neural_a
         repetition_count=20,
         models={"embed-fp32": fp32_identity},
         quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+        measurement_preparation_path="hoisted",
     )
     expected = ExpectedWinners(winners={"exact": "overlap"})
     assembly = RunAssembly(expected_winners=expected)
@@ -336,6 +463,7 @@ def test_record_to_dict_renders_one_model_identity_by_arm_name_when_one_neural_a
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -384,6 +512,7 @@ def test_record_to_dict_renders_both_neural_arms_model_identities_when_both_ran(
         repetition_count=20,
         models={"embed-fp32": fp32_identity, "embed-int8": int8_identity},
         quantized_operators=Maybe(value=None, reason="not read in this test"),
+        measurement_preparation_path="hoisted",
     )
     expected = ExpectedWinners(winners={"exact": "overlap"})
     assembly = RunAssembly(expected_winners=expected)
@@ -396,6 +525,7 @@ def test_record_to_dict_renders_both_neural_arms_model_identities_when_both_ran(
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -434,6 +564,7 @@ def test_record_to_dict_renders_quantized_operators_as_a_mapping_of_matmul_conve
         repetition_count=20,
         models={},
         quantized_operators=Maybe(value=census, reason=None),
+        measurement_preparation_path="hoisted",
     )
     expected = ExpectedWinners(winners={"exact": "overlap"})
     assembly = RunAssembly(expected_winners=expected)
@@ -446,6 +577,7 @@ def test_record_to_dict_renders_quantized_operators_as_a_mapping_of_matmul_conve
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -502,6 +634,7 @@ def test_record_to_dict_renders_a_present_int8_accuracy_divergence_per_family() 
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=divergence, reason=None),
     )
 
@@ -539,6 +672,8 @@ def test_record_to_dict_tags_an_invalid_accuracy_report_with_its_status() -> Non
         peak_memory=_unavailable("overlap"),
         cold_start=_unavailable("overlap"),
         artifact_size=_unavailable("overlap"),
+        preparation=_unavailable("overlap"),
+        preparation_cost=_unavailable("overlap"),
     )
     record = _record_with(invalid_result)
 
@@ -561,6 +696,147 @@ def test_record_to_dict_tags_an_unavailable_measurement_with_its_status() -> Non
         "status": "unavailable",
         "arm": "overlap",
         "reason": "not measured in this test",
+    }
+
+
+def test_record_to_dict_tags_an_ok_preparation_comparison_with_its_status() -> None:
+    from joinless.resolver import ScoredComparisons
+    from joinless.runrecord import PreparationComparison
+
+    result = ArmResult(
+        accuracy=_ok_report(),
+        warm_latency=_unavailable("overlap"),
+        peak_memory=_unavailable("overlap"),
+        cold_start=_unavailable("overlap"),
+        artifact_size=_unavailable("overlap"),
+        preparation=PreparationComparison(
+            hoisted=ScoredComparisons(path="hoisted", scores=(0.5,)),
+            naive=ScoredComparisons(path="naive", scores=(0.5,)),
+        ),
+        preparation_cost=_unavailable("overlap"),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    preparation = payload["results"]["overlap"]["preparation"]
+    assert preparation["status"] == "ok"
+    assert preparation["hoisted"] == {"path": "hoisted", "scores": [0.5]}
+    assert preparation["naive"] == {"path": "naive", "scores": [0.5]}
+
+
+def test_record_to_dict_tags_an_unavailable_preparation_comparison_with_its_status() -> (
+    None
+):
+    result = ArmResult(
+        accuracy=_ok_report(),
+        warm_latency=_unavailable("embed-int8"),
+        peak_memory=_unavailable("embed-int8"),
+        cold_start=_unavailable("embed-int8"),
+        artifact_size=_unavailable("embed-int8"),
+        preparation=_unavailable("embed-int8"),
+        preparation_cost=_unavailable("embed-int8"),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    preparation = payload["results"]["overlap"]["preparation"]
+    assert preparation == {
+        "status": "unavailable",
+        "arm": "embed-int8",
+        "reason": "not measured in this test",
+    }
+
+
+def test_record_to_dict_tags_an_ok_preparation_cost_with_its_status() -> None:
+    from joinless.measurement import PreparationCost
+
+    result = ArmResult(
+        accuracy=_ok_report(),
+        warm_latency=_unavailable("overlap"),
+        peak_memory=_unavailable("overlap"),
+        cold_start=_unavailable("overlap"),
+        artifact_size=_unavailable("overlap"),
+        preparation=_unavailable("overlap"),
+        preparation_cost=PreparationCost(
+            arm="overlap",
+            hoisted_seconds=0.001,
+            naive_seconds=0.004,
+            record_count=4,
+            comparison_count=4,
+        ),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    preparation_cost = payload["results"]["overlap"]["preparation_cost"]
+    assert preparation_cost == {
+        "status": "ok",
+        "arm": "overlap",
+        "hoisted_seconds": 0.001,
+        "naive_seconds": 0.004,
+        "record_count": 4,
+        "comparison_count": 4,
+    }
+
+
+def test_record_to_dict_tags_an_unavailable_preparation_cost_with_its_status() -> None:
+    result = ArmResult(
+        accuracy=_ok_report(),
+        warm_latency=_unavailable("embed-int8"),
+        peak_memory=_unavailable("embed-int8"),
+        cold_start=_unavailable("embed-int8"),
+        artifact_size=_unavailable("embed-int8"),
+        preparation=_unavailable("embed-int8"),
+        preparation_cost=_unavailable("embed-int8"),
+    )
+    record = _record_with(result)
+
+    payload = record_to_dict(record)
+
+    preparation_cost = payload["results"]["overlap"]["preparation_cost"]
+    assert preparation_cost == {
+        "status": "unavailable",
+        "arm": "embed-int8",
+        "reason": "not measured in this test",
+    }
+
+
+def test_record_to_dict_renders_the_preparation_asymmetrys_occupancy_untagged() -> None:
+    """Finding 1: the occupancy distribution lives nested under
+    ``preparation_asymmetry``, not as a bare top-level field a reader could
+    mistake for describing ``evaluation_set``'s 470-pair accuracy corpus
+    rather than the one small preparation-cost sample it actually describes.
+    ``BucketOccupancy`` is always computed for a run - unlike a per-arm
+    measurement it carries no ADR-0013 either/or slot, so it renders as a
+    plain nested object with no ``status`` wrapper (issue #66)."""
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    assert "bucket_occupancy" not in payload
+    assert payload["preparation_asymmetry"]["occupancy"] == {
+        "counts": [1, 2, 3],
+        "cell_size_degrees": 0.01,
+        "max_occupancy": 3,
+    }
+
+
+def test_record_to_dict_renders_the_preparation_asymmetry_untagged() -> None:
+    record = _record_with(_arm_result())
+
+    payload = record_to_dict(record)
+
+    assert payload["preparation_asymmetry"] == {
+        "occupancy": {
+            "counts": [1, 2, 3],
+            "cell_size_degrees": 0.01,
+            "max_occupancy": 3,
+        },
+        "classical_speedups": {},
+        "neural_speedups": {},
     }
 
 
@@ -594,6 +870,8 @@ def test_record_to_dict_renders_a_defined_artifact_size_metric_with_no_status_wr
         peak_memory=_unavailable("embed-fp32"),
         cold_start=_unavailable("embed-fp32"),
         artifact_size=Metric(value=94000000.0, undefined_reason=None),
+        preparation=_unavailable("embed-fp32"),
+        preparation_cost=_unavailable("embed-fp32"),
     )
     record = _record_with(result)
 
@@ -614,6 +892,8 @@ def test_record_to_dict_tags_an_unavailable_artifact_size_with_its_status() -> N
         peak_memory=_unavailable("embed-int8"),
         cold_start=_unavailable("embed-int8"),
         artifact_size=_unavailable("embed-int8"),
+        preparation=_unavailable("embed-int8"),
+        preparation_cost=_unavailable("embed-int8"),
     )
     record = _record_with(result)
 
@@ -648,6 +928,8 @@ def test_record_to_dict_renders_a_frozenset_as_a_sorted_list() -> None:
         peak_memory=_unavailable("overlap"),
         cold_start=cold_start,
         artifact_size=_unavailable("overlap"),
+        preparation=_unavailable("overlap"),
+        preparation_cost=_unavailable("overlap"),
     )
     record = _record_with(result)
 
@@ -695,6 +977,7 @@ def test_record_to_dict_renders_a_contradiction_with_its_family_and_both_winners
         evaluation_set=_evaluation_set(),
         selected_thresholds=(),
         contradictions=(contradiction,),
+        preparation_asymmetry=_preparation_asymmetry(),
         int8_accuracy_divergence=Maybe(value=None, reason="not computed in this test"),
     )
 
@@ -784,6 +1067,8 @@ def test_write_record_never_overwrites_an_existing_record(tmp_path: Path) -> Non
             peak_memory=_unavailable("overlap"),
             cold_start=_unavailable("overlap"),
             artifact_size=_unavailable("overlap"),
+            preparation=_unavailable("overlap"),
+            preparation_cost=_unavailable("overlap"),
         )
     )
 

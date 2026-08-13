@@ -268,6 +268,124 @@ def measure_warm_latency(
     )
 
 
+# The one prepare call before either timed section runs past runtime start-up
+# cost (import, lazy graph load) — measured separately by measure_cold_start,
+# so folding it into hoisted or naive here would double-count it (RFC-0002
+# Method step 2). Both timed sections share this single warm-up rather than
+# each getting their own, so neither path is warmed up more than the other.
+_PREPARATION_COST_SCRIPT = """
+import json
+import os
+import time
+
+import joinless.scoring as scoring
+
+params = json.loads(os.environ["JOINLESS_MEASURE_PARAMS"])
+try:
+    scorer = scoring.get_scorer(params["arm"])
+except (ValueError, scoring.ScorerUnavailable) as exc:
+    print(json.dumps({"status": "unavailable", "reason": str(exc)}))
+else:
+    left_names = params["left_names"]
+    right_names = params["right_names"]
+    left_indices = params["left_indices"]
+    right_indices = params["right_indices"]
+
+    scorer.prepare(left_names[0])
+
+    _start = time.perf_counter()
+    scorer.prepare_all(left_names)
+    scorer.prepare_all(right_names)
+    hoisted_seconds = time.perf_counter() - _start
+
+    _start = time.perf_counter()
+    for _left_index, _right_index in zip(left_indices, right_indices):
+        scorer.prepare(left_names[_left_index])
+        scorer.prepare(right_names[_right_index])
+    naive_seconds = time.perf_counter() - _start
+
+    print(json.dumps({
+        "status": "ok",
+        "hoisted_seconds": hoisted_seconds,
+        "naive_seconds": naive_seconds,
+    }))
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationCost:
+    """Hoisted and naive preparation cost for one arm, over the same
+    candidate set whose bucket occupancy the run record carries alongside it
+    (issue #66) — never quoted without the occupancy that produced it
+    (ADR-0009: "a hoist speed-up quoted without the occupancy that produced
+    it cannot be transferred to any other dataset").
+
+    ``hoisted_seconds`` times ``prepare_all`` called once per side, batched
+    — the production pattern ADR-0009 requires. ``naive_seconds`` times
+    ``prepare`` called fresh for both records of every comparison in
+    ``comparison_count``, reproducing the redundant recomputation the hoist
+    removes. Both are timed in the same isolated worker (RFC-0002 Method
+    step 7 names "preparation cost" alongside cold start, warm scoring and
+    peak RSS as a metric requiring isolation), sharing one warm-up so
+    neither path is measured any warmer than the other.
+
+    ``record_count`` and ``comparison_count`` travel with the figures for
+    the same reason ``WarmLatency`` carries its own ``warmup_count`` and
+    ``repetition_count``: a reader holding one ``PreparationCost`` alone can
+    see what dataset produced it without cross-referencing another part of
+    the run record.
+    """
+
+    arm: str
+    hoisted_seconds: float
+    naive_seconds: float
+    record_count: int
+    comparison_count: int
+
+
+def measure_preparation_cost(
+    arm: str,
+    left_names: Sequence[str],
+    right_names: Sequence[str],
+    comparison_pairs: Sequence[tuple[int, int]],
+    *,
+    artifact: ArtifactRequirement | None = None,
+) -> PreparationCost | Unavailable:
+    """Hoisted vs naive preparation cost for ``arm`` over
+    ``comparison_pairs`` — each pair a ``(left_index, right_index)`` into
+    ``left_names``/``right_names`` — in a fresh isolated worker (RFC-0002
+    Method step 7, issue #66).
+
+    ``left_names``, ``right_names`` and ``comparison_pairs`` must each be
+    non-empty — validated before anything is spawned, so a caller error is a
+    ``ValueError`` here rather than a confusing shape from the worker.
+    """
+    if not left_names:
+        raise ValueError("left_names must not be empty")
+    if not right_names:
+        raise ValueError("right_names must not be empty")
+    if not comparison_pairs:
+        raise ValueError("comparison_pairs must not be empty")
+
+    params = {
+        "arm": arm,
+        "left_names": list(left_names),
+        "right_names": list(right_names),
+        "left_indices": [pair[0] for pair in comparison_pairs],
+        "right_indices": [pair[1] for pair in comparison_pairs],
+    }
+    result = _measure(arm, artifact, _PREPARATION_COST_SCRIPT, params)
+    if isinstance(result, Unavailable):
+        return result
+    return PreparationCost(
+        arm=arm,
+        hoisted_seconds=cast(float, result["hoisted_seconds"]),
+        naive_seconds=cast(float, result["naive_seconds"]),
+        record_count=len(left_names) + len(right_names),
+        comparison_count=len(comparison_pairs),
+    )
+
+
 # resource.getrusage's ru_maxrss unit is platform-dependent — kilobytes on
 # Linux, bytes everywhere this project supports otherwise (ADR-0002 scopes out
 # Windows) — so the worker normalises to bytes itself rather than leaving the

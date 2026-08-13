@@ -62,7 +62,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from joinless.records import Record, record_id
 from joinless.scoring import ThresholdMatcher
@@ -228,6 +228,123 @@ def candidate_pairs(
         for record in left
         for candidate in _candidates_for(record, index, cell_size)
     ]
+
+
+PreparationPath = Literal["hoisted", "naive"]
+"""Which call pattern produced a set of scores over candidate pairs
+(ADR-0009, issue #65). ``"hoisted"`` is ``prepare_all`` ahead of the
+comparison loop — the production pattern :func:`resolve` already uses
+internally. ``"naive"`` is ``prepare`` called fresh inside the loop, once
+per comparison, reproducing the redundant recomputation the hoist removes:
+a record compared against several candidates is prepared that many times
+over, never reused. Both are real, selectable code paths
+(:func:`score_candidates`) rather than one path with a flag bolted on —
+nothing defaults silently to either (see that function's required
+``preparation`` argument)."""
+
+_PREPARATION_PATHS: frozenset[str] = frozenset({"hoisted", "naive"})
+
+
+@dataclass(frozen=True, slots=True)
+class ScoredComparisons:
+    """Every candidate pair's score, tagged with the preparation path that
+    produced it (issue #65's third bullet: "the run record states which
+    one produced each figure").
+
+    The path travels on the value itself, the same way
+    :class:`~joinless.measurement.WarmLatency` carries its own
+    ``warmup_count``/``repetition_count`` rather than leaving a reader to
+    infer how a figure was measured from context — a caller holding one
+    ``ScoredComparisons`` never has to trust a variable name or a separate
+    part of a record to know which call pattern produced its scores.
+
+    That is also this issue's answer to where path attribution belongs in
+    a run record's shape: **on the figure, not as a run-level flag.**
+    Issue #66 measures preparation cost *both* ways, for the same arm, in
+    the same run — a single "which path did this run use" field could not
+    describe that run at all, since neither path is uniquely the run's
+    path. Each figure is its own path's figure; this type is where that
+    decision is made structural rather than left to be discovered when
+    issue #66's own cost fields are added.
+    """
+
+    path: PreparationPath
+    scores: tuple[float, ...]
+
+
+def score_candidates(
+    left: Sequence[Record],
+    right: Sequence[Record],
+    matcher: ThresholdMatcher[Any],
+    *,
+    preparation: PreparationPath,
+    cell_size: float = DEFAULT_CELL_SIZE_DEGREES,
+) -> ScoredComparisons:
+    """Score every candidate pair (FR-2) under an explicitly chosen
+    preparation strategy (ADR-0009, issue #65) — the naive per-comparison
+    control, retained and selectable, next to the hoisted path
+    :func:`resolve` always uses.
+
+    ``preparation`` is a required keyword argument with no default:
+    "neither path is the default by accident" (issue #65's third bullet)
+    is enforced structurally here rather than left as a convention a
+    caller could forget — there is no call to this function that omits
+    which strategy it wants.
+
+    ``"hoisted"`` calls ``matcher.scorer.prepare_all`` once for ``left``
+    and once for ``right``, ahead of the comparison loop — :func:`resolve`'s
+    own production pattern, reused here rather than reimplemented.
+    ``"naive"`` calls ``matcher.scorer.prepare`` fresh for both sides of
+    every candidate pair, reproducing the per-comparison recomputation
+    ADR-0009 describes as "the naive implementation... most people write
+    first."
+
+    This function does not decide matches, break ties, or merge — unlike
+    :func:`resolve`, whose job is exactly that. It exists only to make the
+    two preparation call patterns comparable over the same candidate set:
+    for the score-equality test issue #65's second bullet asks for, and as
+    the primitive issue #66 times to measure preparation cost both ways.
+    Returned scores are in :func:`candidate_pairs`'s own order.
+    """
+    if preparation not in _PREPARATION_PATHS:
+        available = ", ".join(sorted(_PREPARATION_PATHS))
+        raise ValueError(
+            f"Unknown preparation path {preparation!r}. Available: {available}."
+        )
+
+    pairs = candidate_pairs(left, right, cell_size)
+
+    if preparation == "hoisted":
+        prepared_left: dict[int, Any] = dict(
+            zip(
+                (id(record) for record in left),
+                matcher.scorer.prepare_all([record.name for record in left]),
+                strict=True,
+            )
+        )
+        prepared_right: dict[int, Any] = dict(
+            zip(
+                (id(record) for record in right),
+                matcher.scorer.prepare_all([record.name for record in right]),
+                strict=True,
+            )
+        )
+        scores = tuple(
+            matcher.scorer.score(
+                prepared_left[id(left_record)], prepared_right[id(right_record)]
+            )
+            for left_record, right_record in pairs
+        )
+    else:
+        scores = tuple(
+            matcher.scorer.score(
+                matcher.scorer.prepare(left_record.name),
+                matcher.scorer.prepare(right_record.name),
+            )
+            for left_record, right_record in pairs
+        )
+
+    return ScoredComparisons(path=preparation, scores=scores)
 
 
 def _haversine_km(a: Record, b: Record) -> float:
