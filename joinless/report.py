@@ -195,7 +195,7 @@ class UnsupportedSchema(ValueError):
 # this value rather than repeating it, so a bump cannot move the writer while
 # leaving the reader behind — the failure that shape prevents is a record written
 # and immediately unreadable by the same build.
-RENDERABLE_SCHEMA = "benchmark-v6"
+RENDERABLE_SCHEMA = "benchmark-v7"
 
 
 def render_per_family_table(record: Mapping[str, Any]) -> str:

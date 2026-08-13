@@ -212,8 +212,28 @@ class Environment:
     earn a new field on every construction site of two types this project
     already reuses across many unrelated tests (YAGNI) — recording it once,
     here, where every other run-wide measurement-methodology fact
-    (``warmup_count``, ``repetition_count``, ``thread_count``) already
-    lives, says the same thing without it.
+    (``warmup_count``, ``repetition_count``, ``onnx_threads_configured``)
+    already lives, says the same thing without it.
+
+    ``onnx_threads_configured`` and ``onnx_threads_observed`` are two
+    distinct facts a single ``thread_count`` field used to blur into one
+    (issue #109). Neither is a count of Python-level ``threading.Thread``
+    objects — that fact is :attr:`~joinless.measurement.PeakMemory.thread_count`,
+    measured per arm in its own worker, not here. ``onnx_threads_configured``
+    is always ``null`` with a reason: no arm this project runs passes
+    ``SessionOptions``, ``intra_op_num_threads`` or ``inter_op_num_threads``
+    to :func:`onnxruntime.InferenceSession` (ADR-0006), so there is no
+    configured value to report — a fact that stays true whether or not a
+    neural arm happens to run, which is why it does not vary with
+    :attr:`models` the way ``onnx_threads_observed`` does. Pinning the pool
+    is a new experiment RFC-0002's protocol does not call for; the absence of
+    pinning is itself the fact this field records, not a gap waiting to be
+    filled in. ``onnx_threads_observed`` states what ONNX Runtime did in the
+    absence of that configuration — its own automatic intra-op pool, left
+    unpinned — for a run where at least one neural arm constructed a
+    session, and is inapplicable with a reason otherwise: a run with no
+    neural arm has no session for ONNX Runtime to have sized a pool for
+    (ADR-0013).
 
     ``peak_memory``, ``cold_start`` and ``artifact_size`` are not covered
     by this field: each measures exactly one comparison with nothing to
@@ -229,7 +249,8 @@ class Environment:
     hardware: Hardware
     runtime_versions: RuntimeVersions
     power_mode: str
-    thread_count: int
+    onnx_threads_configured: Maybe[int]
+    onnx_threads_observed: Maybe[str]
     warmup_count: int
     repetition_count: int
     models: Mapping[str, ModelIdentity]
