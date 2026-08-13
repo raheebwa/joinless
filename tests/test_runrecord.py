@@ -81,6 +81,7 @@ def _ok_report() -> EvaluationReport:
         true_positives=1,
         predicted_positives=1,
         actual_positives=1,
+        false_positives=0,
     )
     aggregate = AggregateResult(
         precision=metric, recall=metric, f1=metric, derivation="pooled"

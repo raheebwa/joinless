@@ -214,6 +214,57 @@ it cost on the reference machine, and does a regime exist where the cheaper arm 
 the right call* — not a single figure that resolves that trade-off on the reader's
 behalf.
 
+**Frontier constraints are exactly three: a memory ceiling on peak RSS, a latency
+ceiling on warm p50, an accuracy floor on F1.** Peak RSS and warm p50 are each measured
+once per arm, independent of family; F1 is the Metrics table's "single comparable
+number" and is read per family (below). An arm whose accuracy for a family is undefined
+— `null`, with a reason, never `0.0` (ADR-0013) — cannot be compared against a stated
+floor one way or the other, so it is excluded from that family's frontier with the
+record's own reason attached, not silently scored as failing the floor.
+
+**The frontier is computed per family, never from the whole-record aggregate.** A
+constraint set is a statement about the reader's own data, and the aggregate describes
+this benchmark's chosen mixture of families, not the reader's — a frontier computed from
+it would be answering a question about the corpus, not about the family the reader's
+data actually resembles.
+
+### The global threshold, and per-family operating points alongside the frontier
+
+One arm's threshold is selected once, from the pooled calibration split, by the
+identical procedure every arm shares (ADR-0011 rule 2), and applied unchanged to every
+family in the sealed test — there is no per-family retuning, because a caller deploying
+this arm sets one threshold, and reporting only per-family thresholds would describe a
+configuration no deployment has.
+
+That single threshold does not serve every family equally. `character noise` is the
+clearest case: across all five corpus seeds, every arm proposes zero matches there at
+its global threshold, on a family that carries 40 real positives in the sealed split —
+not because the family is unlabelled (it is not: `semantic alias` and `near-miss
+negative` are the two families that are all-negative *by design*,
+`joinless/corpus.py`'s module docstring), but because none of the four arms' calibrated
+thresholds happen to admit anything on this family's particular perturbation shape. The
+per-family F1 there is `null`, and it stays `null` — reported as a stated property of
+the run: *this arm proposes nothing on this family at its global threshold*, not *this
+arm was not measured*. Two alternatives were rejected on their merits: changing the
+selection objective to stop easy families dominating would trade one measured weakness
+for a hidden one, since this project has no principled weighting to offer between
+families any more than it has one between accuracy and cost; and replacing the global
+threshold with per-family thresholds would answer a question nobody deploying a single
+matcher asked.
+
+**The frontier reports per-family operating points alongside it, resolving the same
+tension a different way.** A reader whose data resembles `character noise` is not served
+by a threshold selected for a mixture they do not have — but *reporting* that arm's own
+figure for that family, at the run's frozen threshold, is a different act from *retuning*
+the threshold to that family. Every family block in the frontier's output carries each
+arm's own precision, recall and F1 for that family — the same frozen-threshold figure
+`accuracy.pooled.per_family` already records, grouped by family instead of pooled — set
+beside that arm's per-run cost figures, so a reader meeting a `null` for their family sees
+exactly what produced it and can read every other arm's figure for the same family in the
+same place. This is not per-arm tuning and does not breach ADR-0011 rule 2: the scoring
+procedure and the threshold are identical for every arm and every family, which is what
+keeps the comparison about the matchers rather than about how each one was tuned.
+
 ## Open questions
 
 1. How many repeats before the p99 stabilises on this workload?

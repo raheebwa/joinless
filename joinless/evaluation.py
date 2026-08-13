@@ -85,7 +85,23 @@ class FamilyResult:
     """Precision, recall and F1 for one perturbation family (issue #48), plus the
     raw counts behind them. The counts travel with the metrics — not just the
     ratios — so that :func:`_aggregate` can pool a mixture of families without
-    re-scanning the pairs that produced this row (see its docstring)."""
+    re-scanning the pairs that produced this row (see its docstring).
+
+    ``false_positives`` is a fifth figure, alongside the three ratios (issue
+    #105). ``semantic alias`` and ``near-miss negative`` carry label ``0``
+    only, by design (:mod:`joinless.corpus`'s module docstring) — recall and
+    F1 are undefined on both, for every arm, because ``actual_positives`` is
+    always zero there. That ``null`` is correct (ADR-0013) and also hides the
+    one result those two families exist to produce: which arms fell for the
+    trap and how often. ``false_positives`` is ``predicted_positives -
+    true_positives`` — a plain count, never a ratio, so it has no
+    empty-denominator case to be undefined by and is defined on every family,
+    every arm, every run. Computed by the same, unbranched arithmetic as the
+    other three counts (:func:`_family_result`), so an all-positive family
+    is never special-cased away from it — it is simply always ``0`` there, a
+    predicted positive in a family where every label is ``1`` being a true
+    positive by definition.
+    """
 
     family: str
     precision: Metric
@@ -94,6 +110,7 @@ class FamilyResult:
     true_positives: int
     predicted_positives: int
     actual_positives: int
+    false_positives: int
 
 
 # ADR-0011 rule 4 / issue #48 rule 3: "any aggregate is labelled as derived".
@@ -199,6 +216,7 @@ def _family_result(
         true_positives=true_positives,
         predicted_positives=predicted_positives,
         actual_positives=actual_positives,
+        false_positives=predicted_positives - true_positives,
     )
 
 
