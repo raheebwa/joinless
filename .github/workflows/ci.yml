@@ -284,19 +284,26 @@ jobs:
         # so it is as much a part of the boundary as the runtime is: a base
         # install that acquired it would make the embedding arm's import cost
         # partly invisible, which is the measurement ADR-0014 exists to protect.
+        #
+        # `onnx` is checked the same way too: it is on the same side of the
+        # boundary, in the same `neural` extra, and reachable from
+        # joinless.embedding's own lazily-imported operator-census reads
+        # (tests/test_import_boundary.py covers the in-process invariant; this
+        # step covers the profile's install state the same way it does for the
+        # other two packages).
         env:
           INSTALL_PROFILE: ${{ matrix.install-profile }}
         run: |
           set -euo pipefail
           case "$INSTALL_PROFILE" in
             *neural*)
-              for module in onnxruntime tokenizers; do
+              for module in onnxruntime tokenizers onnx; do
                 python -c "import $module" \
                   || { echo "::error::neural extra installed but $module is not importable"; exit 1; }
               done
               ;;
             *)
-              for module in onnxruntime tokenizers; do
+              for module in onnxruntime tokenizers onnx; do
                 if python -c "import $module" 2>/dev/null; then
                   echo "::error::base profile must not make $module importable"
                   exit 1
