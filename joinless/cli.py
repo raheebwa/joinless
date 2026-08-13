@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT
-"""The ``joinless`` console entry point: ``resolve``, ``compare``, ``doctor``.
+"""The ``joinless`` console entry point: ``resolve``, ``compare``, ``doctor``,
+``benchmark``.
 
-RFC-0003 names five commands; only three exist at this point in the project (M1).
-``report`` and ``benchmark`` are later work and deliberately absent here and from
-``--help`` — this module's job is to name only the commands that actually exist,
-not to reserve a place for ones that don't yet.
+RFC-0003 names five commands; four exist at this point in the project (M2).
+``report`` is later work and deliberately absent here and from ``--help`` — this
+module's job is to name only the commands that actually exist, not to reserve a
+place for ones that don't yet.
 
 **The record-set schema for ``resolve``.** Neither the PRD nor RFC-0003 fixes a file
 format for the two record sets FR-1 asks to be merged — that is a different object
@@ -34,11 +35,29 @@ default is used deliberately: a record that doesn't clear it stays unmatched
 detecting *availability* must never cost the import boundary
 ``tests/test_import_boundary.py`` enforces.
 
+**``benchmark`` runs RFC-0002's protocol over the built-in corpus and writes one
+record** (issue #45). There is no ``--pairs`` flag and no labelled-pairs file loader
+here — reading a supplied file is issue #76, milestone M7 — so the only input is
+:mod:`joinless.corpus`'s synthetic corpus, pooled across every seed in
+:data:`joinless.corpus.SEEDS` (:func:`_pool_corpora`) so that ADR-0011 rule 3's
+"several deterministic seeds" is a fact about what threshold selection and the sealed
+test actually drew from, not only about what
+:func:`~joinless.runrecord.build_evaluation_set_identity` claims for the same run.
+Only ``overlap`` and ``fuzzy`` are registered in :mod:`joinless.scoring` today;
+``embed-fp32`` and ``embed-int8`` (:data:`_ARMS`) are attempted anyway, and
+``get_scorer`` raises the same ``ValueError`` for either name that it raises for any
+other name it does not recognise — ADR-0013's "an arm that cannot initialise is
+recorded... not omitted" satisfied by the real case rather than a stub, because
+milestone M3 is what will register them, not a hypothetical gap invented here.
+
 Every command here is local computation over :mod:`joinless.records`,
-:mod:`joinless.resolver` and :mod:`joinless.scoring` plus stdlib file and platform
-calls — nothing in this module ever opens a socket, so "the command completes with
-no network interface available" (all three issues) holds structurally rather than by
-a check this module performs.
+:mod:`joinless.resolver`, :mod:`joinless.scoring`, :mod:`joinless.corpus`,
+:mod:`joinless.evaluation`, :mod:`joinless.measurement` and :mod:`joinless.runrecord`,
+plus stdlib file, platform and subprocess calls that never construct a socket —
+``pmset`` (power mode) and the isolated workers :mod:`joinless.measurement` already
+spawns are local process launches, not network I/O. Nothing in this module ever opens
+a socket, so "the command completes with no network interface available" (all four
+issues) holds structurally rather than by a check this module performs.
 """
 
 from __future__ import annotations
@@ -47,16 +66,49 @@ import argparse
 import importlib.metadata
 import importlib.util
 import json
+import os
 import platform
+import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from joinless import corpus
+from joinless.corpus import Corpus, LabelledPair, Role
+from joinless.evaluation import (
+    Contradiction,
+    EvaluationReport,
+    ExpectedWinners,
+    InvalidRun,
+    SelectedThreshold,
+    evaluate_sealed_test,
+    find_contradictions,
+    freeze_threshold,
+    select_threshold,
+)
+from joinless.measurement import (
+    Unavailable,
+    measure_cold_start,
+    measure_peak_memory,
+    measure_warm_latency,
+)
 from joinless.records import Record
 from joinless.resolver import ResolutionResult
 from joinless.resolver import resolve as resolve_records
+from joinless.runrecord import (
+    ArmResult,
+    Environment,
+    Hardware,
+    Maybe,
+    RunAssembly,
+    RuntimeVersions,
+    build_evaluation_set_identity,
+    write_record,
+)
 from joinless.scoring import ScorerUnavailable, ThresholdMatcher, get_scorer
 
 # Not a calibrated value (ADR-0011's calibration procedure needs labelled pairs;
@@ -220,10 +272,325 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- benchmark ---------------------------------------------------------------
+
+# ADR-0008 names four arms; only "overlap" and "fuzzy" are registered in
+# joinless.scoring today (milestone M2). "embed-fp32" and "embed-int8" are attempted
+# here anyway — see the module docstring for why that is the real ADR-0013
+# "unavailable" case rather than a stub.
+_ARMS: tuple[str, ...] = ("overlap", "fuzzy", "embed-fp32", "embed-int8")
+
+_WARMUP_COUNT = 5
+_REPETITION_COUNT = 20
+
+_SCHEMA = "benchmark-v1"
+
+# ADR-0011 rule 4: "the expected winner per family is recorded before the run."
+# Reasoning per family, grounded in joinless.corpus's own module docstring and
+# joinless.scoring.OverlapScorer's documented weakness:
+#   - word order: the overlap coefficient is a set intersection, invariant to token
+#     order by construction.
+#   - character noise / transliteration: OverlapScorer is documented as
+#     character-blind — a single scrambled or transliterated character changes a
+#     token entirely and removes any overlap. FuzzyScorer exists for exactly this
+#     failure.
+#   - semantic alias: built with zero shared tokens between the two names
+#     (joinless.corpus docstring), so overlap's intersection is provably empty and it
+#     always scores 0.0 — a classical arm is not the one "tempted" here (an
+#     embedding arm is), and overlap is the classical arm guaranteed to reject it.
+#   - near-miss negative: joinless.corpus's own docstring names this "the failure a
+#     classical, string-based arm is expected to be tempted by" — both overlap and
+#     fuzzy are expected to over-match here, so the arm expected to get it right is
+#     the one not yet registered. Naming it anyway keeps the pre-registration
+#     honest: the resulting contradiction says "the arm expected to win this family
+#     did not run," not "the wrong classical arm won."
+#   - everything else (exact, formatting, abbreviation): RFC-0002's evaluation-set
+#     table marks these as not expected to separate the arms at all; overlap is
+#     named as the representative baseline.
+_EXPECTED_WINNERS = ExpectedWinners(
+    winners={
+        "exact": "overlap",
+        "formatting": "overlap",
+        "word order": "overlap",
+        "abbreviation": "overlap",
+        "character noise": "fuzzy",
+        "semantic alias": "overlap",
+        "transliteration": "fuzzy",
+        "near-miss negative": "embed-fp32",
+    }
+)
+
+
+def _parse_pmset_output(text: str) -> str:
+    """Normalise macOS ``pmset -g batt`` output to ``"ac"``, ``"battery"`` or
+    ``"unknown"``."""
+    if "AC Power" in text:
+        return "ac"
+    if "Battery Power" in text:
+        return "battery"
+    return "unknown"
+
+
+def _parse_linux_power_supply_status(text: str) -> str:
+    """Normalise the contents of a ``/sys/class/power_supply/*/status`` file the
+    same way."""
+    normalised = text.strip().lower()
+    if normalised in {"charging", "full"}:
+        return "ac"
+    if normalised == "discharging":
+        return "battery"
+    return "unknown"
+
+
+# A module-level name, rather than a literal inlined into _detect_power_mode, so a
+# test can point it at a real temporary directory instead of a path that exists on
+# Linux alone (ADR-0016 rule 3: use the real thing rather than mocking the
+# filesystem).
+_LINUX_POWER_SUPPLY_DIR = Path("/sys/class/power_supply")
+
+
+def _detect_linux_power_mode(supply_dir: Path) -> str:
+    """The first power-supply status file under ``supply_dir``, normalised — or
+    ``"unknown"`` when none exists."""
+    status_files = sorted(supply_dir.glob("*/status"))
+    if not status_files:
+        return "unknown"
+    return _parse_linux_power_supply_status(status_files[0].read_text(encoding="utf-8"))
+
+
+def _detect_power_mode() -> str:
+    """``"ac"``, ``"battery"`` or ``"unknown"`` (RFC-0002 Method step 5), read via
+    ``pmset`` on Darwin and ``/sys/class/power_supply`` on Linux (ADR-0002's
+    macOS-and-Linux scope) — neither of which opens a socket."""
+    system = platform.system()
+    if system == "Darwin":
+        result = subprocess.run(
+            ["pmset", "-g", "batt"], capture_output=True, text=True, check=False
+        )
+        return _parse_pmset_output(result.stdout)
+    if system == "Linux":
+        return _detect_linux_power_mode(_LINUX_POWER_SUPPLY_DIR)
+    return "unknown"
+
+
+def _hardware() -> Hardware:
+    return Hardware(
+        cpu_count=os.cpu_count() or 1,
+        machine=platform.machine(),
+        python_version=platform.python_version(),
+        release=platform.release(),
+        system=platform.system(),
+        total_memory_bytes=int(os.sysconf("SC_PAGE_SIZE"))
+        * int(os.sysconf("SC_PHYS_PAGES")),
+    )
+
+
+def _runtime_versions() -> RuntimeVersions:
+    # No arm in this run constructs an ONNX Runtime session (only "overlap" and
+    # "fuzzy" are registered; see the module docstring), so its version is
+    # inapplicable rather than absent-and-uninteresting (ADR-0013).
+    return RuntimeVersions(
+        onnxruntime=Maybe(value=None, reason="no neural arm in this run"),
+        rapidfuzz=importlib.metadata.version("rapidfuzz"),
+    )
+
+
+def _environment(power_mode: str) -> Environment:
+    return Environment(
+        hardware=_hardware(),
+        runtime_versions=_runtime_versions(),
+        power_mode=power_mode,
+        # Single-threaded: no arm this module can run configures a thread pool or a
+        # GPU/NPU execution provider (ADR-0006), and neither classical scorer
+        # spawns a worker thread of its own.
+        thread_count=1,
+        warmup_count=_WARMUP_COUNT,
+        repetition_count=_REPETITION_COUNT,
+        model=Maybe(value=None, reason="no neural arm in this run"),
+        quantized_operators=Maybe(value=None, reason="no int8 arm in this run"),
+    )
+
+
+def _pool_corpora(corpora: Sequence[Corpus]) -> Corpus:
+    """Combine every seed's pairs and roles into one corpus (ADR-0011 rule 3: "the
+    corpus is generated under several deterministic seeds").
+    :func:`~joinless.evaluation.select_threshold` and
+    :func:`~joinless.evaluation.evaluate_sealed_test` each take one
+    :class:`~joinless.corpus.Corpus`; pooling here is what lets a single
+    threshold-selection and sealed-test pass draw from every seed rather than only
+    the first, matching the seeds
+    :func:`~joinless.runrecord.build_evaluation_set_identity` records for the same
+    run. Every seed's pair ids already carry that seed as a prefix
+    (:mod:`joinless.corpus`), so no id collides across corpora and ``Corpus``'s own
+    duplicate check (its ``__post_init__``) passes.
+
+    ``seed`` on the returned corpus is the first corpus's seed — a field this
+    function has to fill in to construct a valid ``Corpus``, but nothing downstream
+    reads it: the run record's evaluation-set identity is built from ``corpora``
+    directly (:func:`~joinless.runrecord.build_evaluation_set_identity`), not from
+    this pooled value.
+    """
+    pairs: list[LabelledPair] = []
+    roles: dict[str, Role] = {}
+    for one_corpus in corpora:
+        pairs.extend(one_corpus.pairs)
+        roles.update(one_corpus.roles)
+    return Corpus(
+        seed=corpora[0].seed, pairs=tuple(pairs), roles=MappingProxyType(roles)
+    )
+
+
+def _measure_arm(
+    arm: str, pooled: Corpus, left_name: str, right_name: str, power_mode: str
+) -> tuple[ArmResult, SelectedThreshold | None]:
+    """Run the full protocol for ``arm``, or mark it unavailable everywhere at
+    once.
+
+    Every field this returns is decided by exactly one ``get_scorer`` call:
+    succeeding runs threshold selection, sealed-test evaluation and all three
+    resource measurements; failing marks accuracy, warm latency, peak memory and
+    cold start unavailable with that one call's reason, without spawning a worker
+    to rediscover the same failure a second way — ADR-0013's rule is that the arm
+    is recorded, not how many times its unavailability gets independently
+    confirmed. No threshold is selected for an arm that never got this far, so it
+    contributes nothing to the run's ``selected_thresholds`` list.
+    """
+    try:
+        scorer = get_scorer(arm)
+    except (ValueError, ScorerUnavailable) as exc:
+        reason = str(exc)
+        return (
+            ArmResult(
+                accuracy=InvalidRun(reason=reason),
+                warm_latency=Unavailable(arm=arm, reason=reason),
+                peak_memory=Unavailable(arm=arm, reason=reason),
+                cold_start=Unavailable(arm=arm, reason=reason),
+            ),
+            None,
+        )
+
+    selected = select_threshold(pooled, scorer)
+    frozen = freeze_threshold(selected)
+    accuracy = evaluate_sealed_test(pooled, scorer, frozen)
+    warm_latency = measure_warm_latency(
+        arm,
+        left_name,
+        right_name,
+        warmup_count=_WARMUP_COUNT,
+        repetition_count=_REPETITION_COUNT,
+    )
+    peak_memory = measure_peak_memory(arm, left_name, right_name, power_mode=power_mode)
+    cold_start = measure_cold_start(arm, left_name, right_name)
+    return (
+        ArmResult(
+            accuracy=accuracy,
+            warm_latency=warm_latency,
+            peak_memory=peak_memory,
+            cold_start=cold_start,
+        ),
+        selected,
+    )
+
+
+def _find_contradictions(
+    expected: ExpectedWinners, arm_results: Mapping[str, ArmResult]
+) -> tuple[Contradiction, ...]:
+    """Compare ``expected`` against every arm's actual per-family accuracy
+    (ADR-0011 rule 4, issue #50), delegating the comparison itself to
+    :func:`joinless.evaluation.find_contradictions` — this function's own job
+    is only to pick out which arms have a real per-family table to compare.
+    An arm whose ``accuracy`` is :class:`~joinless.evaluation.InvalidRun`
+    (an unregistered scorer, or one whose dependency is missing) contributes
+    no row, which is what leaves ``find_contradictions``'s own "fewer than
+    two comparable arms" rule to skip a family such as "near-miss negative"
+    whose expected winner is an arm not yet registered (module docstring) —
+    a fact this function does not re-decide, only feeds correctly.
+    """
+    reports: dict[str, EvaluationReport] = {
+        arm: result.accuracy
+        for arm, result in arm_results.items()
+        if isinstance(result.accuracy, EvaluationReport)
+    }
+    return find_contradictions(expected, reports)
+
+
+def _format_contradictions(contradictions: Sequence[Contradiction]) -> list[str]:
+    """The lines ``benchmark`` prints for its contradictions finding (issue
+    #50: "findings... not a footnote") — a pure function of the comparison
+    :func:`_find_contradictions` already computed, so what the command prints
+    and what it persists in the run record's ``contradictions`` field can
+    never say two different things about the same run.
+    """
+    if not contradictions:
+        return ["contradictions: none — every pre-registered expectation held"]
+    lines = [
+        (
+            f"contradictions: {len(contradictions)} pre-registered expectation(s) "
+            "did not hold"
+        )
+    ]
+    for contradiction in contradictions:
+        lines.append(
+            f"  {contradiction.family}: expected {contradiction.expected_winner!r} "
+            f"to win, actual winner was {contradiction.actual_winner!r}"
+        )
+    return lines
+
+
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    del args  # benchmark takes no flags: the built-in corpus, every arm, one record.
+
+    started_at = datetime.now(UTC)
+    power_mode = _detect_power_mode()
+    corpora = corpus.generate_corpora(corpus.SEEDS)
+    pooled = _pool_corpora(corpora)
+    evaluation_set = build_evaluation_set_identity(corpora)
+    left_name = pooled.pairs[0].left_name
+    right_name = pooled.pairs[0].right_name
+
+    assembly = RunAssembly(expected_winners=_EXPECTED_WINNERS)
+    arm_results: dict[str, ArmResult] = {}
+    selected_thresholds: list[SelectedThreshold] = []
+    for arm in _ARMS:
+        result, selected = _measure_arm(arm, pooled, left_name, right_name, power_mode)
+        assembly.add_arm(arm, result)
+        arm_results[arm] = result
+        if selected is not None:
+            selected_thresholds.append(selected)
+
+    # ADR-0011 rule 4 / issue #50: the pre-registered expectations are compared
+    # against the actual outcome here, once, and the same value is both printed
+    # below and persisted on the record - never recomputed for either.
+    contradictions = _find_contradictions(_EXPECTED_WINNERS, arm_results)
+
+    record = assembly.build(
+        schema=_SCHEMA,
+        started_at=started_at,
+        command=("joinless", "benchmark"),
+        environment=_environment(power_mode),
+        evaluation_set=evaluation_set,
+        selected_thresholds=tuple(selected_thresholds),
+        contradictions=contradictions,
+    )
+    try:
+        path = write_record(record, Path("benchmarks"))
+    except FileExistsError as exc:
+        print(
+            f"a run record already exists at {exc.filename}: refusing to overwrite it",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"wrote {path}")
+    for line in _format_contradictions(contradictions):
+        print(line)
+    return 0
+
+
 _COMMANDS: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "resolve": _cmd_resolve,
     "compare": _cmd_compare,
     "doctor": _cmd_doctor,
+    "benchmark": _cmd_benchmark,
 }
 
 
@@ -297,6 +664,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Report architecture, execution provider, installed profile and "
             "offline status, in a form that can be pasted directly into a "
             "bug report."
+        ),
+    )
+
+    subparsers.add_parser(
+        "benchmark",
+        help="Run RFC-0002's protocol over the built-in corpus and write a record.",
+        description=(
+            "Run every configured arm over the built-in synthetic corpus under "
+            "RFC-0002's protocol, and write one record to benchmarks/. An arm "
+            "that cannot initialise is recorded as unavailable with a reason, "
+            "never omitted. No flags: the corpus and the arms are fixed."
         ),
     )
 
