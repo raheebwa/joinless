@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from joinless.measurement import ArtifactRequirement, verify_artifact
@@ -279,6 +280,140 @@ def test_measure_preparation_cost_reports_an_unexpected_crash_as_unavailable_not
 
     assert isinstance(result, Unavailable)
     assert result.reason == "boom"
+
+
+# --- _preparation_costs(): the isolated worker's own timing routine, proven to be
+# the shipped resolver.prepare_hoisted/prepare_naive rather than a second copy of
+# them (issue #100) --------------------------------------------------------------
+
+from joinless import resolver
+from joinless.measurement import _preparation_costs
+from joinless.scoring import OverlapScorer
+
+
+def test_preparation_costs_hoisted_phase_measures_through_resolver_prepare_hoisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that reimplemented the hoist itself would never reach
+    ``resolver.prepare_hoisted`` at all — this monkeypatch would sit unused
+    and ``calls`` would stay empty. That is the failure this test exists to
+    catch (issue #100's second bullet: a test must fail on divergence, not a
+    comment asserting agreement)."""
+    calls: list[tuple[list[str | None], list[str | None]]] = []
+
+    def _fake_prepare_hoisted(
+        scorer: object, left: object, right: object
+    ) -> tuple[dict[int, object], dict[int, object]]:
+        del scorer
+        calls.append(
+            (
+                [record.name for record in left],  # type: ignore[attr-defined]
+                [record.name for record in right],  # type: ignore[attr-defined]
+            )
+        )
+        return {}, {}
+
+    monkeypatch.setattr(resolver, "prepare_hoisted", _fake_prepare_hoisted)
+
+    hoisted_seconds, _naive_seconds = _preparation_costs(
+        OverlapScorer(),
+        ["Acme Traders", "Rocket Fuel Traders"],
+        ["Acme Traders Ltd", "Zephyr Logistics"],
+        [0, 0, 1, 1],
+        [0, 1, 0, 1],
+    )
+
+    assert calls == [
+        (
+            ["Acme Traders", "Rocket Fuel Traders"],
+            ["Acme Traders Ltd", "Zephyr Logistics"],
+        )
+    ]
+    assert hoisted_seconds >= 0.0
+
+
+def test_preparation_costs_naive_phase_measures_through_resolver_prepare_naive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same proof as the hoisted test above, for the naive phase: a worker
+    that reimplemented the naive loop itself would never reach
+    ``resolver.prepare_naive``, and ``calls`` would stay empty."""
+    calls: list[list[tuple[str | None, str | None]]] = []
+
+    def _fake_prepare_naive(
+        scorer: object, pairs: object
+    ) -> list[tuple[object, object]]:
+        del scorer
+        calls.append([(left.name, right.name) for left, right in pairs])  # type: ignore[attr-defined]
+        return []
+
+    monkeypatch.setattr(resolver, "prepare_naive", _fake_prepare_naive)
+
+    _hoisted_seconds, naive_seconds = _preparation_costs(
+        OverlapScorer(),
+        ["Acme Traders", "Rocket Fuel Traders"],
+        ["Acme Traders Ltd", "Zephyr Logistics"],
+        [0, 0, 1, 1],
+        [0, 1, 0, 1],
+    )
+
+    assert calls == [
+        [
+            ("Acme Traders", "Acme Traders Ltd"),
+            ("Acme Traders", "Zephyr Logistics"),
+            ("Rocket Fuel Traders", "Acme Traders Ltd"),
+            ("Rocket Fuel Traders", "Zephyr Logistics"),
+        ]
+    ]
+    assert naive_seconds >= 0.0
+
+
+class _CountingScorer:
+    """Counts calls made directly on this object, mirroring
+    ``tests/test_resolver.py``'s own ``_CallCountingScorer`` (issue #65) —
+    the same technique, applied here to prove ``_preparation_costs``
+    reproduces ``score_candidates``'s own documented call pattern
+    end-to-end, with no monkeypatch involved."""
+
+    def __init__(self, inner: OverlapScorer) -> None:
+        self._inner = inner
+        self.prepare_calls = 0
+        self.prepare_all_calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def prepare_all(self, names: Sequence[str | None]) -> list[frozenset[str]]:
+        self.prepare_all_calls += 1
+        return self._inner.prepare_all(names)
+
+    def prepare(self, name: str | None) -> frozenset[str]:
+        self.prepare_calls += 1
+        return self._inner.prepare(name)
+
+    def score(self, a: frozenset[str], b: frozenset[str]) -> float:
+        return self._inner.score(a, b)
+
+
+def test_preparation_costs_reproduces_the_documented_call_pattern() -> None:
+    """``PreparationCost``'s own docstring: hoisted times ``prepare_all``
+    called once per side; naive times ``prepare`` called fresh for both
+    records of every comparison. One extra ``prepare`` call is the shared
+    warm-up before either timed section (this module's own comment above
+    ``_PREPARATION_COST_SCRIPT``)."""
+    counting = _CountingScorer(OverlapScorer())
+
+    _preparation_costs(
+        counting,
+        ["Acme Traders", "Rocket Fuel Traders"],
+        ["Acme Traders Ltd", "Zephyr Logistics"],
+        [0, 0, 1, 1],
+        [0, 1, 0, 1],
+    )
+
+    assert counting.prepare_all_calls == 2
+    assert counting.prepare_calls == 1 + 2 * 4
 
 
 # --- measure_peak_memory(): peak RSS per arm, in its own process (issue #55) -------

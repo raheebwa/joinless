@@ -65,7 +65,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from joinless.records import Record, record_id
-from joinless.scoring import ThresholdMatcher
+from joinless.scoring import Scorer, ThresholdMatcher
 
 # A city-scale default: about 1.1 km of latitude at the equator, and less of
 # longitude away from it. Public-record and civic listings (PRD §1) are typically
@@ -272,6 +272,52 @@ class ScoredComparisons:
     scores: tuple[float, ...]
 
 
+def prepare_hoisted(
+    scorer: Scorer[Any], left: Sequence[Record], right: Sequence[Record]
+) -> tuple[dict[int, Any], dict[int, Any]]:
+    """``prepare_all`` once for ``left`` and once for ``right`` — the hoisted
+    call pattern (ADR-0009), extracted out of :func:`score_candidates` so it
+    is the one place that pattern is written rather than a copy of it
+    (issue #100). Returns each side's prepared value keyed by
+    ``id(record)``, which is how :func:`score_candidates` looks a candidate
+    pair's prepared values up without re-preparing them;
+    :mod:`joinless.measurement` calls this directly, over its own isolated
+    worker's names and indices turned back into :class:`Record` objects, to
+    time the same call pattern instead of maintaining a second one.
+    """
+    prepared_left = dict(
+        zip(
+            (id(record) for record in left),
+            scorer.prepare_all([record.name for record in left]),
+            strict=True,
+        )
+    )
+    prepared_right = dict(
+        zip(
+            (id(record) for record in right),
+            scorer.prepare_all([record.name for record in right]),
+            strict=True,
+        )
+    )
+    return prepared_left, prepared_right
+
+
+def prepare_naive(
+    scorer: Scorer[Any], pairs: Sequence[tuple[Record, Record]]
+) -> list[tuple[Any, Any]]:
+    """``prepare`` called fresh for both records of every pair in ``pairs``,
+    in ``pairs``'s own order — the naive call pattern (ADR-0009), extracted
+    out of :func:`score_candidates` for the same reason as
+    :func:`prepare_hoisted`: one implementation, called by
+    :func:`score_candidates` for real scoring and by
+    :mod:`joinless.measurement` to time the same pattern (issue #100).
+    """
+    return [
+        (scorer.prepare(left_record.name), scorer.prepare(right_record.name))
+        for left_record, right_record in pairs
+    ]
+
+
 def score_candidates(
     left: Sequence[Record],
     right: Sequence[Record],
@@ -291,13 +337,15 @@ def score_candidates(
     caller could forget — there is no call to this function that omits
     which strategy it wants.
 
-    ``"hoisted"`` calls ``matcher.scorer.prepare_all`` once for ``left``
-    and once for ``right``, ahead of the comparison loop — :func:`resolve`'s
-    own production pattern, reused here rather than reimplemented.
-    ``"naive"`` calls ``matcher.scorer.prepare`` fresh for both sides of
-    every candidate pair, reproducing the per-comparison recomputation
-    ADR-0009 describes as "the naive implementation... most people write
-    first."
+    ``"hoisted"`` delegates to :func:`prepare_hoisted` — ``prepare_all``
+    once for ``left`` and once for ``right``, ahead of the comparison loop,
+    :func:`resolve`'s own production pattern. ``"naive"`` delegates to
+    :func:`prepare_naive` — ``prepare`` fresh for both sides of every
+    candidate pair, reproducing the per-comparison recomputation ADR-0009
+    describes as "the naive implementation... most people write first."
+    Both are the one implementation of their pattern in this package
+    (issue #100): :mod:`joinless.measurement` calls the same two functions,
+    rather than a second copy of either loop, to time them.
 
     This function does not decide matches, break ties, or merge — unlike
     :func:`resolve`, whose job is exactly that. It exists only to make the
@@ -315,20 +363,7 @@ def score_candidates(
     pairs = candidate_pairs(left, right, cell_size)
 
     if preparation == "hoisted":
-        prepared_left: dict[int, Any] = dict(
-            zip(
-                (id(record) for record in left),
-                matcher.scorer.prepare_all([record.name for record in left]),
-                strict=True,
-            )
-        )
-        prepared_right: dict[int, Any] = dict(
-            zip(
-                (id(record) for record in right),
-                matcher.scorer.prepare_all([record.name for record in right]),
-                strict=True,
-            )
-        )
+        prepared_left, prepared_right = prepare_hoisted(matcher.scorer, left, right)
         scores = tuple(
             matcher.scorer.score(
                 prepared_left[id(left_record)], prepared_right[id(right_record)]
@@ -337,11 +372,8 @@ def score_candidates(
         )
     else:
         scores = tuple(
-            matcher.scorer.score(
-                matcher.scorer.prepare(left_record.name),
-                matcher.scorer.prepare(right_record.name),
-            )
-            for left_record, right_record in pairs
+            matcher.scorer.score(prepared_a, prepared_b)
+            for prepared_a, prepared_b in prepare_naive(matcher.scorer, pairs)
         )
 
     return ScoredComparisons(path=preparation, scores=scores)
