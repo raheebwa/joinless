@@ -278,20 +278,30 @@ jobs:
         # not of the package's own behaviour — that in-process invariant (no
         # module reachable from `import joinless` initialises the runtime) is
         # covered once, profile-independently, by the test suite itself.
+        #
+        # `tokenizers` is checked the same way and for the same reason. ADR-0017
+        # puts it in the neural extra because an ONNX graph consumes token ids,
+        # so it is as much a part of the boundary as the runtime is: a base
+        # install that acquired it would make the embedding arm's import cost
+        # partly invisible, which is the measurement ADR-0014 exists to protect.
         env:
           INSTALL_PROFILE: ${{ matrix.install-profile }}
         run: |
           set -euo pipefail
           case "$INSTALL_PROFILE" in
             *neural*)
-              python -c "import onnxruntime" \
-                || { echo "::error::neural extra installed but onnxruntime is not importable"; exit 1; }
+              for module in onnxruntime tokenizers; do
+                python -c "import $module" \
+                  || { echo "::error::neural extra installed but $module is not importable"; exit 1; }
+              done
               ;;
             *)
-              if python -c "import onnxruntime" 2>/dev/null; then
-                echo "::error::base profile must not make onnxruntime importable"
-                exit 1
-              fi
+              for module in onnxruntime tokenizers; do
+                if python -c "import $module" 2>/dev/null; then
+                  echo "::error::base profile must not make $module importable"
+                  exit 1
+                fi
+              done
               ;;
           esac
 
