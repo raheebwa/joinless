@@ -508,9 +508,9 @@ Results are scoped to this disclosed synthetic benchmark on the reference machin
 
 ## Target platform
 
-Arm64 client devices. The reference platform is Apple Silicon (M2 Max). Every published
-number names the machine that produced it, and no platform is described without a run
-record in [`benchmarks/`](benchmarks/).
+Arm64 client devices. The reference run was produced on Apple Silicon; its canonical
+record reports `arm64`, 12 logical CPUs, and 32.0 GiB RAM, but does not identify the exact
+chip. No platform is described without a run record in [`benchmarks/`](benchmarks/).
 
 The code is plain Python and ONNX Runtime, so Windows on Arm, Arm64 Linux laptops and
 Arm single-board computers with sufficient memory are *expected* to work. That is an
