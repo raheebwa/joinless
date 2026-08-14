@@ -291,7 +291,7 @@ half-met checklist reads as a met one:
 | OpenSSF Scorecard `Code-Review` | **Not adopted.** One maintainer. The substitute is stated plainly: every change lands with a linked ADR/RFC and a green CI run. This project does not claim peer review it did not have. |
 | OpenSSF Scorecard `Contributors` (3+ organisations) | **Not adopted.** Not achievable by decision. |
 | `Fuzzing` / OSS-Fuzz | **Not adopted.** The surface is a string similarity function over local input. Revisit if the package ever parses an untrusted binary format. |
-| `Signed-Releases` + SBOM | **Deferred, not declined** — mandatory at `0.1.0`. There is nothing to sign yet, and claiming the practice now would be false. |
+| `Signed-Releases` + SBOM | **Adopted at `0.1.0`**, as this table said it would be. Every release artifact carries a keyless build-provenance attestation bound to the workflow run that produced it, and a CycloneDX bill of materials is published beside it. Verify with `gh attestation verify <artifact> --repo raheebwa/joinless`. |
 | Contributor Licence Agreement | **Not used.** The DCO (`git commit -s`) instead. |
 | OpenSSF Best Practices badge enrolment | **Not enrolled.** The criteria are adopted on merit; a badge is not a goal. |
 

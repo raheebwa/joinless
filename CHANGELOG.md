@@ -12,6 +12,14 @@ warns nobody.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-08-14
+
+First release. Everything below was built in this cycle, so the whole entry is
+`Added` apart from the defects this project found in its own measurements and
+corrected before publishing them.
+
 ### Added
 
 - Package manifest (`pyproject.toml`) with a PEP 639 MIT licence expression.
@@ -97,3 +105,6 @@ warns nobody.
   of this figure was noise large enough to flip which arm looked faster; the median is
   stable across independent runs where the single draw was not, and `warmup_count`/
   `repetition_count` now travel on the figure itself.
+
+[Unreleased]: https://github.com/raheebwa/joinless/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/raheebwa/joinless/releases/tag/v0.1.0
