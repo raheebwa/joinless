@@ -86,7 +86,8 @@ jobs:
           python -m pip install --quiet cyclonedx-bom
           python -m cyclonedx_py environment /tmp/sbom-venv \
             --output-format JSON \
-            --outfile "dist/joinless-${GITHUB_REF_NAME#v}-sbom.cdx.json"
+            --output-reproducible \
+            --output-file "dist/joinless-${GITHUB_REF_NAME#v}-sbom.cdx.json"
           ls -l dist/
 
       - name: Attest the build provenance
