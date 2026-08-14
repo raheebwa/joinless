@@ -1,0 +1,115 @@
+# Cuts a release from a version tag: build, describe, sign, publish.
+#
+# CONTRIBUTING's "Declines, on the record" table defers signed releases and an SBOM only
+# until `0.1.0`, at which point it makes both mandatory. This workflow is how that
+# commitment is met rather than restated: nothing here is hand-run, so a release cannot be
+# published without the provenance attestation and the bill of materials that go with it.
+#
+# Signing is keyless. The attestation is bound to this workflow's identity through the
+# OIDC token GitHub issues for the run, so there is no long-lived key to hold, rotate, or
+# leak — and a verifier checks the artifact against the workflow that built it rather than
+# against a signature whoever holds the key could have produced anywhere.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build, attest and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its artifacts
+      id-token: write # OIDC token the keyless signature is bound to
+      attestations: write # record the provenance attestation
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Confirm the tag matches the packaged version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A tag naming one version while the manifest names another produces an artifact
+          # nobody can trace back to a release. Fail here rather than publish that.
+          packaged=$(python3 -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tagged="${REF_NAME#v}"
+          if [ "$packaged" != "$tagged" ]; then
+            echo "::error::tag $REF_NAME declares $tagged; pyproject.toml declares $packaged"
+            exit 1
+          fi
+          echo "version $packaged"
+
+      - name: Confirm the changelog describes this version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Keep a Changelog is only useful if a release cannot outrun it.
+          if ! grep -qE "^## \[${REF_NAME#v}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no dated section for ${REF_NAME#v}"
+            exit 1
+          fi
+
+      - name: Build the distributions
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet build
+          python -m build
+          ls -l dist/
+
+      - name: Generate the bill of materials
+        run: |
+          set -euo pipefail
+          # Describes what a base install actually pulls in, which is the install profile a
+          # user gets by default. The neural extra is named in the manifest the SBOM is
+          # generated from, so a reader can see what opting into it would add.
+          # Built from a venv holding this package and nothing else. Generating it from
+          # the job's own environment would list `build` and the SBOM generator itself as
+          # though a user installing joinless acquired them, which is the opposite of what
+          # a bill of materials is for.
+          python -m venv /tmp/sbom-venv
+          /tmp/sbom-venv/bin/pip install --quiet .
+          python -m pip install --quiet cyclonedx-bom
+          python -m cyclonedx_py environment /tmp/sbom-venv \
+            --output-format JSON \
+            --outfile "dist/joinless-${GITHUB_REF_NAME#v}-sbom.cdx.json"
+          ls -l dist/
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "dist/*.whl, dist/*.tar.gz, dist/*-sbom.cdx.json"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The body points at the changelog rather than restating it, so the release and
+          # the file it describes cannot drift apart.
+          {
+            printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md) for what changed.\n\n' "$REPO" "$REF_NAME"
+            printf 'Every artifact here carries a keyless build-provenance attestation, bound to the\n'
+            printf 'workflow run that produced it rather than to a key anyone holds. Verify one with:\n\n'
+            printf '```sh\n'
+            printf 'gh attestation verify <artifact> --repo %s\n' "$REPO"
+            printf '```\n\n'
+            printf 'The `*-sbom.cdx.json` file is the CycloneDX bill of materials for a base install.\n'
+          } > release-notes.md
+          gh release create "$REF_NAME" dist/* --title "$REF_NAME" --notes-file release-notes.md
