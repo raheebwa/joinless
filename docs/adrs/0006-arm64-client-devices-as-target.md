@@ -22,7 +22,8 @@ resolver that never needs the network removes that step entirely.
 **Target Arm64 client devices. All inference runs locally. No network calls at match
 time.**
 
-Reference platform for published numbers: **Apple Silicon (M2 Max)**. The code is plain
+The reference run was produced on **Apple Silicon**. Its canonical record reports `arm64`,
+12 logical CPUs, and 32.0 GiB RAM, but does not identify the exact chip. The code is plain
 Python plus ONNX Runtime, so other Arm64 clients — Windows on Arm, Arm64 Linux laptops,
 Arm SBCs with sufficient memory — are expected to work. That expectation follows from the
 dependency set and has not been measured; it is stated as expected compatibility, and a
